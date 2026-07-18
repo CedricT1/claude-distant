@@ -141,6 +141,23 @@ Le harness (Claude) accède au PC distant via les outils suivants (tous ciblés 
 
 Tous les outils respectent la **politique de confirmation locale** du client : en mode `confirm`, l'utilisateur doit approuver les actions destructives localement.
 
+### Authentification MCP : `static_bearer` vs `oauth`
+
+Le canal harnais↔relay (`/mcp`) supporte deux modes via `MCP_AUTH_MODE` :
+
+- `static_bearer` (défaut, MVP) : jeton unique `MCP_BEARER_TOKEN`, tous les outils accessibles.
+- `oauth` : Resource Server OAuth 2.1, jetons Bearer JWT scopés (`session:connect`, `command:execute`, `session:terminate`, `client:provision`). Émission via :
+
+  ```bash
+  python -m relay.tokens issue --sub harness-operateur \
+    --scopes session:connect,command:execute,session:terminate,client:provision \
+    --ttl 3600
+  ```
+
+- `issue_client_token(ttl_seconds?)` : outil MCP (scope `client:provision`) pour obtenir un jeton client `per_session` court à donner à l'opérateur distant, sans passer par un appel direct à `PerSessionTokenStore`.
+
+Voir [docs/SECURITY.md](docs/SECURITY.md) pour le détail (modèle de menace, TLS, scopes, audit, kill-switch).
+
 ## Documentation
 
 - **[docs/PLAN.md](docs/PLAN.md)** : plan de développement, phases, invariants de sécurité

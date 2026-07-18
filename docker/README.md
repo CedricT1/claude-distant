@@ -62,13 +62,45 @@ Toutes les variables se configent dans `docker/.env` (voir `.env.example` pour l
 |----------|--------|-------------|
 | `HOST` | `0.0.0.0` | Adresse de binding du relay |
 | `PORT` | `8000` | Port TCP du relay |
-| `CLIENT_TOKEN` | — | Token Bearer pour l'authentification client (secret) |
-| `MCP_BEARER_TOKEN` | — | Token Bearer pour l'authentification MCP/harness (secret) |
-| `SESSION_TTL_SECONDS` | `1800` | Durée de vie des codes de session (en secondes) |
+| `CLIENT_TOKEN` | — | Token Bearer pour l'authentification client (secret), mode `CLIENT_AUTH_MODE=shared` |
+| `CLIENT_AUTH_MODE` | `shared` | `shared` (jeton unique) ou `per_session` (jetons courts émis via l'outil MCP `issue_client_token`) |
+| `MCP_BEARER_TOKEN` | — | Token Bearer pour l'authentification MCP/harness (secret), mode `MCP_AUTH_MODE=static_bearer` |
+| `MCP_AUTH_MODE` | `static_bearer` | `static_bearer` (jeton unique) ou `oauth` (JWT scopés, voir `docs/SECURITY.md`) |
+| `MCP_JWT_SECRET` | — | Secret HS256 de signature/vérification des JWT (mode `oauth` uniquement) |
+| `MCP_JWT_ALGORITHM` | `HS256` | Algorithme de signature JWT (mode `oauth`) |
+| `MCP_JWT_ISSUER_URL` / `MCP_JWT_RESOURCE_SERVER_URL` | auto-suffisant | Métadonnées OAuth exposées par le SDK MCP (mode `oauth`) |
+| `SESSION_TTL_SECONDS` | `1800` | Durée de vie des codes de session (en secondes) ; aussi TTL par défaut des jetons `issue_client_token` |
+| `COMMAND_DENYLIST` / `COMMAND_ALLOWLIST` | — | Motifs regex séparés par `;` (voir `relay/command_policy.py`) |
+| `MAX_COMMANDS_PER_SESSION` / `RATE_LIMIT_PER_MINUTE` | — | Quotas par session |
+| `AUDIT_LOG_PATH` | `/app/logs/audit.log` | Chemin du journal d'audit JSONL chaîné |
+| `TLS_DOMAIN` | `relay.example.com` | Nom d'hôte public pour le reverse proxy Caddy (profil `tls`, voir ci-dessous) |
 
 ### Volumes
 
 - `./logs` : répertoire optionnel pour les logs et audit du relay
+- `caddy_data` / `caddy_config` : certificats TLS et état Caddy (profil `tls`, voir ci-dessous)
+
+## TLS strict (reverse proxy)
+
+Le relay écoute en HTTP interne uniquement ; il ne fait jamais de terminaison
+TLS lui-même. Un reverse proxy Caddy (fourni, service optionnel sous le
+profil `tls`) termine le TLS 1.2+ devant le relay :
+
+```bash
+# Configurer TLS_DOMAIN dans docker/.env (nom d'hôte public, DNS pointant
+# vers cette machine pour que Let's Encrypt puisse valider le domaine)
+echo "TLS_DOMAIN=relay.example.com" >> docker/.env
+
+docker-compose -f docker/docker-compose.yml --profile tls up -d
+```
+
+Seul le port 443 (Caddy) doit être exposé publiquement en production ; le
+port direct du relay (`PORT`, 8000 par défaut) ne devrait pas être publié sur
+l'hôte une fois le profil `tls` actif (voir le commentaire dans
+`docker-compose.yml`). Une alternative Nginx est fournie dans
+`docker/nginx.conf.example` pour qui préfère gérer ses certificats
+manuellement. Voir [`docs/SECURITY.md`](../docs/SECURITY.md) pour le détail
+complet (modèle de menace, en-têtes de sécurité, choix Caddy vs Nginx).
 
 ## Arrêt et nettoyage
 
@@ -83,8 +115,11 @@ docker-compose -f docker/docker-compose.yml down -v
 ## Sécurité
 
 - **Tokens** : jamais de secrets en dur dans les Dockerfile ou fichiers source. Tous les secrets viennent du `.env` ou des secrets Docker.
-- **Port** : par défaut le relay ne s'expose que localement. Pour un déploiement distant, utilise un reverse-proxy TLS (nginx, Caddy, etc.) ou expose via un VPN.
+- **TLS** : reverse-proxy TLS strict fourni (Caddy, profil `tls` — voir ci-dessus ; alternative Nginx dans `docker/nginx.conf.example`). Le relay lui-même ne parle jamais TLS.
+- **Auth MCP** : `MCP_AUTH_MODE=static_bearer` (défaut) ou `oauth` (JWT scopés, voir `docs/SECURITY.md`).
 - **Healthcheck** : le relay expose un endpoint `/healthz` utilisé par Docker pour surveiller la santé du conteneur.
+
+Voir [`docs/SECURITY.md`](../docs/SECURITY.md) pour le modèle de menace complet.
 
 ## Dépannage
 

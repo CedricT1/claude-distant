@@ -53,15 +53,31 @@ puis répond via `result` (avec `error:"refused_by_user"` si refusé).
 
 ## 2. Canal Harnais ↔ Relay (MCP)
 
-Endpoint MCP Streamable HTTP, auth **Bearer** (migration OAuth 2.1 en phase 5).
-Chaque outil prend un `session_code` pour cibler le bon client.
+Endpoint MCP Streamable HTTP (`/mcp`), servi en HTTP interne derrière un
+reverse proxy TLS strict en production (voir `docs/SECURITY.md`). Auth
+sélectionnée via `MCP_AUTH_MODE` :
 
-| Outil | Paramètres | Retour |
-|---|---|---|
-| `connect_session` | `session_code` | statut, `os`, `hostname` de la cible |
-| `system_info` | `session_code` | OS, uptime, RAM, CPU |
-| `run_command` | `session_code`, `command`, `timeout?` | stdout/stderr, `exit_code` |
-| `run_shell` | `session_code`, `command`, `shell?` (`auto`\|`powershell`\|`pwsh`\|`bash`\|`sh`), `timeout?` | stdout/stderr, `exit_code` |
+- `static_bearer` (défaut, MVP) : jeton Bearer unique (`MCP_BEARER_TOKEN`),
+  tous les outils accessibles à quiconque le détient.
+- `oauth` (phase 5) : Resource Server OAuth 2.1, jetons Bearer **JWT scopés**
+  (HS256, `MCP_JWT_SECRET`) — voir `relay/jwt_auth.py`, émission via
+  `python -m relay.tokens issue`. Chaque outil requiert un scope précis
+  (colonne « Scope » ci-dessous) ; un jeton sans ce scope reçoit
+  `{"status": "error", "error": "forbidden_scope"}` et est journalisé dans
+  l'audit. Un jeton absent/invalide/expiré est rejeté au niveau transport
+  (401), avant tout appel d'outil.
+
+Chaque outil prend un `session_code` pour cibler le bon client (sauf
+`issue_client_token`, qui n'en a pas besoin).
+
+| Outil | Paramètres | Retour | Scope (mode oauth) |
+|---|---|---|---|
+| `connect_session` | `session_code` | statut, `os`, `hostname` de la cible | `session:connect` |
+| `system_info` | `session_code` | OS, uptime, RAM, CPU | — (non protégé par scope, cf. `TOOL_SCOPES`) |
+| `run_command` | `session_code`, `command`, `timeout?` | stdout/stderr, `exit_code` | `command:execute` |
+| `run_shell` | `session_code`, `command`, `shell?` (`auto`\|`powershell`\|`pwsh`\|`bash`\|`sh`), `timeout?` | stdout/stderr, `exit_code` | `command:execute` |
+| `terminate_session` | `session_code` | statut (kill-switch, phase 5) | `session:terminate` |
+| `issue_client_token` | `ttl_seconds?` | `token` client `per_session`, `expires_in` (phase 5) | `client:provision` |
 
 `run_shell` avec `shell="auto"` → PowerShell sur Windows, Bash sur Linux (selon l'OS
 détecté à `register`). Le relay traduit l'appel MCP en message `command` vers le client

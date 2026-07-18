@@ -6,6 +6,11 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.relay
     container_name: claude-distant-relay
+    # En déploiement TLS (profil `tls`, voir le service `caddy` ci-dessous), ce
+    # port ne doit PAS être publié sur l'hôte : seul Caddy (443) doit être
+    # exposé, le relay reste joignable uniquement via le réseau Docker interne
+    # (`http://relay:8000`, cf. `docker/Caddyfile`). Publié ici par défaut pour
+    # ne rien casser des déploiements existants sans TLS (dev/lab).
     ports:
       - "${PORT:-8000}:${PORT:-8000}"
     environment:
@@ -14,6 +19,17 @@ services:
       CLIENT_TOKEN: ${CLIENT_TOKEN}
       MCP_BEARER_TOKEN: ${MCP_BEARER_TOKEN}
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-1800}
+      CLIENT_AUTH_MODE: ${CLIENT_AUTH_MODE:-shared}
+      MCP_AUTH_MODE: ${MCP_AUTH_MODE:-static_bearer}
+      MCP_JWT_SECRET: ${MCP_JWT_SECRET:-}
+      MCP_JWT_ALGORITHM: ${MCP_JWT_ALGORITHM:-HS256}
+      MCP_JWT_ISSUER_URL: ${MCP_JWT_ISSUER_URL:-}
+      MCP_JWT_RESOURCE_SERVER_URL: ${MCP_JWT_RESOURCE_SERVER_URL:-}
+      AUDIT_LOG_PATH: ${AUDIT_LOG_PATH:-/app/logs/audit.log}
+      COMMAND_DENYLIST: ${COMMAND_DENYLIST:-}
+      COMMAND_ALLOWLIST: ${COMMAND_ALLOWLIST:-}
+      MAX_COMMANDS_PER_SESSION: ${MAX_COMMANDS_PER_SESSION:-}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-}
     env_file:
       - .env
     volumes:
@@ -29,6 +45,38 @@ services:
     networks:
       - claude-distant-network
 
+  # Reverse proxy TLS strict (Caddy), OPTIONNEL — activer avec le profil `tls` :
+  #   docker-compose -f docker/docker-compose.yml --profile tls up -d
+  # Termine le TLS 1.2+ (redirection https, HSTS, en-têtes de sécurité, cf.
+  # `docker/Caddyfile`) et reproxy en HTTP interne vers `relay:8000`. Le relay
+  # lui-même n'a besoin d'aucune configuration TLS : il ne voit que du HTTP
+  # côté réseau Docker interne. Voir `docs/SECURITY.md` pour le modèle de
+  # menace complet et le détail du choix Caddy vs Nginx.
+  caddy:
+    image: caddy:2-alpine
+    container_name: claude-distant-caddy
+    profiles: ["tls"]
+    depends_on:
+      - relay
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      TLS_DOMAIN: ${TLS_DOMAIN:-relay.example.com}
+    env_file:
+      - .env
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    networks:
+      - claude-distant-network
+
 networks:
   claude-distant-network:
     driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:
