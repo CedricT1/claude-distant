@@ -69,6 +69,16 @@ est Claude) pour faire de l'administration système sur un PC Windows ou Ubuntu,
   `list_processes`/`kill_process`, `service_status`/`service_restart`,
   `logs` (journalctl / Event Log), `read_file`/`write_file`/`list_dir`,
   `package_update` (apt / Windows Update), `run_command`.
+- **Shell natif selon l'OS** : outil `run_shell(command, shell="auto")` qui exécute
+  la commande dans **PowerShell** sur Windows et **Bash** sur Linux/Ubuntu.
+  - `shell="auto"` (défaut) : le client choisit l'interpréteur selon l'OS détecté.
+  - Override possible : `powershell` / `pwsh` / `bash` / `sh` (si présent sur la cible).
+  - Le harnais peut interroger l'OS via `system_info()` pour adapter sa syntaxe,
+    ou laisser `auto` faire le choix.
+  - Sortie **streamée** (stdout/stderr séparés), `exit_code`, `timeout`, encodage
+    géré (UTF-8 / codepage Windows).
+  - Soumis à la même **politique de confirmation** que `run_command` (les shells
+    étant la primitive la plus puissante).
 
 ### Phase 5 — Durcissement sécurité
 - **Migration OAuth 2.1** côté harnais ; token par-session court côté client.
@@ -93,8 +103,12 @@ service_status(name) / service_restart(name)
 logs(source, lines)
 read_file(path) / write_file(path) / list_dir(path)
 package_update()
-run_command(cmd, timeout)          # soumis à la politique de confirmation
+run_command(cmd, timeout)                 # soumis à la politique de confirmation
+run_shell(command, shell="auto", timeout) # PowerShell (Windows) / Bash (Linux) selon l'OS
 ```
+
+Le paramètre `shell` accepte `auto` (défaut, choix selon l'OS de la cible),
+`powershell`/`pwsh`, `bash` ou `sh`.
 
 ## 5. Structure de dépôt cible
 
