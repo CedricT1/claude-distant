@@ -1,19 +1,35 @@
-version: '3.9'
-
 services:
   relay:
     build:
       context: ..
       dockerfile: docker/Dockerfile.relay
     container_name: claude-distant-relay
-    ports:
-      - "${PORT:-8000}:${PORT:-8000}"
+    # Le relay écoute en HTTP interne sur le réseau Docker uniquement.
+    # Le port n'est pas publié sur l'hôte : seul nginx (port 8080)
+    # doit être exposé en interne. La terminaison TLS est de la
+    # responsabilité du déployeur via un reverse proxy externe.
+    # Pour la compatibilité avec les anciens déploiements sans nginx,
+    # vous pouvez décommenter la ligne ci-dessous et router le port 8000 sur l'hôte
+    # directement (non recommandé en production).
+    # ports:
+    #   - "${PORT:-8000}:${PORT:-8000}"
     environment:
       HOST: ${HOST:-0.0.0.0}
       PORT: ${PORT:-8000}
       CLIENT_TOKEN: ${CLIENT_TOKEN}
       MCP_BEARER_TOKEN: ${MCP_BEARER_TOKEN}
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-1800}
+      CLIENT_AUTH_MODE: ${CLIENT_AUTH_MODE:-shared}
+      MCP_AUTH_MODE: ${MCP_AUTH_MODE:-static_bearer}
+      MCP_JWT_SECRET: ${MCP_JWT_SECRET:-}
+      MCP_JWT_ALGORITHM: ${MCP_JWT_ALGORITHM:-HS256}
+      MCP_JWT_ISSUER_URL: ${MCP_JWT_ISSUER_URL:-}
+      MCP_JWT_RESOURCE_SERVER_URL: ${MCP_JWT_RESOURCE_SERVER_URL:-}
+      AUDIT_LOG_PATH: ${AUDIT_LOG_PATH:-/app/logs/audit.log}
+      COMMAND_DENYLIST: ${COMMAND_DENYLIST:-}
+      COMMAND_ALLOWLIST: ${COMMAND_ALLOWLIST:-}
+      MAX_COMMANDS_PER_SESSION: ${MAX_COMMANDS_PER_SESSION:-}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-}
     env_file:
       - .env
     volumes:
@@ -29,6 +45,26 @@ services:
     networks:
       - claude-distant-network
 
+  # Reverse proxy HTTP-only. Proxies vers relay:8000 sur le réseau interne.
+  # La terminaison TLS est assurée par un reverse proxy externe, de la
+  # responsabilité du déployeur (Caddy, Nginx, Traefik, etc.).
+  # Le déployeur place son propre reverse proxy HTTPS devant ce nginx et
+  # DOIT positionner l'en-tête X-Forwarded-Proto: https lors du forward.
+  # Voir docs/SECURITY.md pour les détails et l'exemple Caddy externe.
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: claude-distant-nginx
+    depends_on:
+      - relay
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    restart: unless-stopped
+    networks:
+      - claude-distant-network
+
 networks:
   claude-distant-network:
     driver: bridge
+

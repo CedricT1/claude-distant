@@ -71,6 +71,17 @@ class SessionStore(abc.ABC):
     async def remove_by_connection(self, connection: Any) -> None:
         """Supprime la/les session(s) associée(s) à une connexion (déconnexion client)."""
 
+    @abc.abstractmethod
+    async def terminate(self, code: str) -> SessionRecord | None:
+        """Invalide explicitement une session (kill-switch).
+
+        Contrairement à `remove` (nettoyage interne, silencieux), `terminate`
+        représente une décision explicite (opérateur/harnais) de couper une
+        session active. Retourne l'enregistrement supprimé (pour que
+        l'appelant, ex. `Broker.terminate_session`, puisse notifier/fermer la
+        connexion associée), ou `None` si le code était déjà inconnu/expiré.
+        """
+
 
 class InMemorySessionStore(SessionStore):
     """Implémentation en mémoire process : dict + `asyncio.Lock`."""
@@ -140,3 +151,7 @@ class InMemorySessionStore(SessionStore):
             for code, record in list(self._records.items()):
                 if record.connection == connection:
                     del self._records[code]
+
+    async def terminate(self, code: str) -> SessionRecord | None:
+        async with self._lock:
+            return self._records.pop(code, None)

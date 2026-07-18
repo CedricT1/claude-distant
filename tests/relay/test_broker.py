@@ -3,7 +3,14 @@ import asyncio
 
 import pytest
 
-from relay.broker import Broker, ClientDisconnectedError, CommandTimeoutError, SessionNotFoundError
+from relay.broker import (
+    Broker,
+    ClientDisconnectedError,
+    CommandDeniedError,
+    CommandTimeoutError,
+    SessionNotFoundError,
+)
+from relay.command_policy import CommandPolicy
 from relay.session_store import InMemorySessionStore
 
 
@@ -136,6 +143,95 @@ class TestDispatchCommandErrors:
                 code, "run_command", {"command": "x"}, timeout=0.05
             ):
                 pass
+
+
+class FakeAuditLog:
+    """Double de test pour AuditLog : capture les événements sans toucher au disque."""
+
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    def record(self, event: dict) -> dict:
+        self.events.append(event)
+        return event
+
+
+class TestCommandPolicyWiring:
+    async def test_denied_command_never_reaches_client(self, store):
+        conn = FakeConnection()
+        policy = CommandPolicy(denylist=["rm -rf"])
+        audit = FakeAuditLog()
+        broker = Broker(session_store=store, default_ttl_seconds=30, command_timeout=1,
+                         command_policy=policy, audit_log=audit)
+        code = await broker.register_connection(conn, os="linux", hostname="h", version="1")
+
+        with pytest.raises(CommandDeniedError):
+            async for _ in broker.dispatch_command(code, "run_command", {"command": "rm -rf /"}):
+                pass
+
+        assert conn.sent == []  # jamais envoyée au client
+
+    async def test_denied_command_is_audited(self, store):
+        conn = FakeConnection()
+        policy = CommandPolicy(denylist=["rm -rf"])
+        audit = FakeAuditLog()
+        broker = Broker(session_store=store, default_ttl_seconds=30, command_timeout=1,
+                         command_policy=policy, audit_log=audit)
+        code = await broker.register_connection(conn, os="linux", hostname="h", version="1")
+
+        with pytest.raises(CommandDeniedError):
+            async for _ in broker.dispatch_command(code, "run_command", {"command": "rm -rf /"}):
+                pass
+
+        assert len(audit.events) == 1
+        assert audit.events[0]["decision"] == "denied"
+        assert audit.events[0]["session_code"] == code
+        assert audit.events[0]["tool"] == "run_command"
+
+    async def test_allowed_command_is_audited_with_outcome(self, store):
+        conn = FakeConnection()
+        policy = CommandPolicy()  # permissive
+        audit = FakeAuditLog()
+        broker = Broker(session_store=store, default_ttl_seconds=30, command_timeout=1,
+                         command_policy=policy, audit_log=audit)
+        code = await broker.register_connection(conn, os="linux", hostname="h", version="1")
+
+        async def run():
+            async for _ in broker.dispatch_command(code, "run_command", {"command": "echo hi"}):
+                pass
+
+        task = asyncio.create_task(run())
+        await asyncio.sleep(0)
+        request_id = conn.sent[0]["request_id"]
+        await broker.handle_client_message(
+            conn, {"type": "result", "request_id": request_id, "exit_code": 0, "error": None}
+        )
+        await task
+
+        assert len(audit.events) == 1
+        assert audit.events[0]["decision"] == "allowed"
+        assert audit.events[0]["outcome"] == {"exit_code": 0, "error": None}
+
+    async def test_without_policy_or_audit_behaves_as_before(self, broker):
+        # `broker` (fixture) est construit sans command_policy/audit_log : aucune
+        # régression pour les usages existants du MVP.
+        conn = FakeConnection()
+        code = await broker.register_connection(conn, os="linux", hostname="h", version="1")
+
+        async def run():
+            chunks = []
+            async for chunk in broker.dispatch_command(code, "run_command", {"command": "x"}):
+                chunks.append(chunk)
+            return chunks
+
+        task = asyncio.create_task(run())
+        await asyncio.sleep(0)
+        request_id = conn.sent[0]["request_id"]
+        await broker.handle_client_message(
+            conn, {"type": "result", "request_id": request_id, "exit_code": 0, "error": None}
+        )
+        chunks = await task
+        assert chunks == [{"type": "result", "exit_code": 0, "error": None}]
 
 
 class TestHeartbeat:

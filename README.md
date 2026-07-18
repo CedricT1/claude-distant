@@ -15,16 +15,20 @@ Accès distant piloté par un harnais IA (Claude) pour l'administration système
 ## Architecture
 
 ```
-┌─────────────────┐         ┌──────────────────────┐         ┌──────────────────┐
-│  PC distant     │  WS/TLS │   RELAY (Docker)     │   MCP   │  Harnais (Claude)│
-│  (Win / Ubuntu) │ ───────▶│  - Broker de session │◀─────── │  + opérateur     │
-│  client Go      │ sortant │  - Serveur MCP auth  │  Bearer │                  │
-│  portable       │         │  - Audit / routage   │  /OAuth │                  │
-└─────────────────┘         └──────────────────────┘         └──────────────────┘
+┌─────────────────┐         ┌──────────────────────────────────┐         ┌──────────────────┐
+│  PC distant     │  WS/TLS │  RELAY (Docker)                  │   MCP   │  Harnais (Claude)│
+│  (Win / Ubuntu) │ ───────▶│  [TLS externe] → nginx (HTTP) →  │◀─────── │  + opérateur     │
+│  client Go      │ sortant │  broker WS + serveur MCP auth    │  Bearer │                  │
+│  portable       │         │  + audit / routage               │  /OAuth │                  │
+└─────────────────┘         └──────────────────────────────────┘         └──────────────────┘
     affiche                        mappe code→client
-    « 784 123 678 »                                    « connecte-toi à
-                                                        784 123 678 »
+    « 784 123 678 »                                                  « connecte-toi à
+                                                                      784 123 678 »
 ```
+
+> La terminaison **TLS est externe** (reverse proxy du déployeur : Caddy/nginx/Traefik).
+> La stack expose un **nginx HTTP-only** en interne devant le relay ; le proxy externe
+> doit positionner `X-Forwarded-Proto: https`. Voir [docs/SECURITY.md](docs/SECURITY.md).
 
 ### Flot type
 
@@ -46,18 +50,19 @@ claude-distant/
 │   ├── mcp_server.py       # Serveur MCP HTTP Streamable
 │   ├── auth.py             # Authentification Bearer
 │   └── requirements.txt     # Dépendances Python
-├── client/                  # Client portable Go
-├── shared/                  # Schémas de protocole partagés (Python/Go)
+├── client/                  # Client portable Go (Makefile de build cross-platform)
 ├── docker/                  # Dockerfile + docker-compose + configuration
 │   ├── Dockerfile.relay     # Image Docker du relay
-│   ├── docker-compose.yml   # Orchestration du relay
+│   ├── docker-compose.yml   # Orchestration : nginx (HTTP) + relay
+│   ├── nginx.conf           # Reverse proxy HTTP-only interne
 │   ├── .env.example         # Modèle de configuration
 │   └── README.md            # Guide Docker détaillé
 ├── docs/                    # Documentation
 │   ├── PLAN.md              # Plan de développement et phases
 │   ├── PROTOCOL.md          # Spécification des protocoles client↔relay et harness↔relay
-│   └── SECURITY.md          # Modèle de menace et considérations de sécurité
-├── tests/                   # Tests unitaires et intégration
+│   ├── SECURITY.md          # Modèle de menace, TLS externe, scopes, audit
+│   └── PACKAGING.md         # Build, signature, modèle « sans trace »
+├── tests/                   # Tests (relay pytest ; client Go côté client/)
 └── README.md               # Ce fichier
 ```
 
@@ -73,30 +78,37 @@ cp docker/.env.example docker/.env
 # CLIENT_TOKEN=<token-fort>
 # MCP_BEARER_TOKEN=<token-fort>
 
-# Builder et lancer le relay
+# Builder et lancer la stack (nginx HTTP-only + relay)
 docker-compose -f docker/docker-compose.yml up -d
 ```
 
-Le relay écoute sur `http://localhost:8000` (configurable).
+La stack expose un **nginx HTTP-only** sur `http://localhost:8080` (configurable via `HTTP_PORT`).
+Placez votre reverse proxy **TLS externe** (Caddy/nginx/Traefik) devant ce port en positionnant
+`X-Forwarded-Proto: https`. Voir [docs/SECURITY.md](docs/SECURITY.md).
 
 ### 2. Builder le client Go
 
 ```bash
 cd client
-go build -o claude-distant .
+go build -o claude-distant .          # build local rapide
+# ou, binaires portables strippés (linux amd64/arm64 + windows amd64) :
+make dist                             # sorties dans client/dist/
+make checksums                        # SHA256SUMS
 ```
-
-Crée un binaire portable `claude-distant` (Windows .exe / Linux /client/claude-distant).
 
 ### 3. Lancer le client sur la machine distante
 
 ```bash
 # Sur Windows
-./claude-distant.exe --relay-url wss://relay.example.com:8000 --token <CLIENT_TOKEN>
+./claude-distant.exe --url wss://relay.example.com --token <CLIENT_TOKEN>
 
 # Sur Linux
-./claude-distant --relay-url wss://relay.example.com:8000 --token <CLIENT_TOKEN>
+./claude-distant --url wss://relay.example.com --token <CLIENT_TOKEN>
 ```
+
+Flags utiles : `--policy auto|confirm|deny` (garde-fou local), `--self-destruct`
+(supprime le binaire à l'arrêt propre). Équivalents en variables d'environnement :
+`CLAUDE_DISTANT_URL`, `CLAUDE_DISTANT_TOKEN`, `CLAUDE_DISTANT_POLICY`, `CLAUDE_DISTANT_SELF_DESTRUCT`.
 
 Le client affiche un code unique à 9 chiffres.
 
@@ -124,22 +136,37 @@ run_shell(command="df -h", shell="auto")
 
 ## Outils MCP disponibles
 
-Le harness (Claude) accède au PC distant via les outils suivants (tous ciblés par `session_code`) :
+Le harness (Claude) accède au PC distant via les outils MCP **actuellement implémentés** (ciblés par `session_code`, sauf `issue_client_token`) :
 
-| Outil | Rôle |
-|-------|------|
-| `connect_session(code)` | Authentifier et se connecter à une session client |
-| `system_info()` | Récupérer OS, uptime, RAM, CPU |
-| `disk_check()` / `disk_usage()` | État et usage disque |
-| `list_processes()` / `kill_process(pid)` | Gestion des processus |
-| `service_status(name)` / `service_restart(name)` | État et redémarrage des services |
-| `logs(source, lines)` | Consulter journalctl (Linux) / Event Log (Windows) |
-| `read_file(path)` / `write_file(path)` / `list_dir(path)` | Accès fichiers (sous restrictions) |
-| `package_update()` | Mises à jour système (apt / Windows Update) |
-| `run_command(cmd, timeout)` | Exécuter une commande arbitraire |
-| `run_shell(command, shell="auto", timeout)` | Exécuter en PowerShell (Windows) / Bash (Linux) selon l'OS |
+| Outil | Rôle | Scope (mode `oauth`) |
+|-------|------|----------------------|
+| `connect_session(session_code)` | Valider et se connecter à une session client | `session:connect` |
+| `system_info(session_code)` | Récupérer OS, uptime, RAM, CPU | — |
+| `run_command(session_code, command, timeout?)` | Exécuter une commande (sans shell) | `command:execute` |
+| `run_shell(session_code, command, shell="auto", timeout?)` | Exécuter en PowerShell (Windows) / Bash (Linux) selon l'OS | `command:execute` |
+| `terminate_session(session_code)` | Kill-switch : clôturer une session | `session:terminate` |
+| `issue_client_token(ttl_seconds?)` | Émettre un jeton client `per_session` court | `client:provision` |
+
+Les tâches sysadmin (check disk, processus, services, logs, mises à jour…) se font via `run_shell`/`run_command` (ex. `df -h` / `Get-Volume`, `systemctl` / `Get-Service`). Des helpers de plus haut niveau dédiés (`disk_check`, `service_restart`, etc.) sont prévus au plan mais pas encore exposés.
 
 Tous les outils respectent la **politique de confirmation locale** du client : en mode `confirm`, l'utilisateur doit approuver les actions destructives localement.
+
+### Authentification MCP : `static_bearer` vs `oauth`
+
+Le canal harnais↔relay (`/mcp`) supporte deux modes via `MCP_AUTH_MODE` :
+
+- `static_bearer` (défaut, MVP) : jeton unique `MCP_BEARER_TOKEN`, tous les outils accessibles.
+- `oauth` : Resource Server OAuth 2.1, jetons Bearer JWT scopés (`session:connect`, `command:execute`, `session:terminate`, `client:provision`). Émission via :
+
+  ```bash
+  python -m relay.tokens issue --sub harness-operateur \
+    --scopes session:connect,command:execute,session:terminate,client:provision \
+    --ttl 3600
+  ```
+
+- `issue_client_token(ttl_seconds?)` : outil MCP (scope `client:provision`) pour obtenir un jeton client `per_session` court à donner à l'opérateur distant, sans passer par un appel direct à `PerSessionTokenStore`.
+
+Voir [docs/SECURITY.md](docs/SECURITY.md) pour le détail (modèle de menace, TLS, scopes, audit, kill-switch).
 
 ## Documentation
 
@@ -165,13 +192,13 @@ Voir [docs/SECURITY.md](docs/SECURITY.md) pour le modèle de menace complet et l
 ## Phases de développement
 
 1. **Phase 0** (✓) : Cadrage sécurité & protocole
-2. **Phase 1** (actuelle) : Broker de session MVP (WebSocket, génération code)
-3. **Phase 2** : Client Go minimal
-4. **Phase 3** : Serveur MCP sur le relay
-5. **Phase 4** : Couche sysadmin cross-platform
-6. **Phase 5** : Durcissement sécurité (OAuth 2.1, audit avancé)
-7. **Phase 6** : Client portable sans trace
-8. **Phase 7** : Tests, observabilité, documentation
+2. **Phase 1** (✓) : Broker de session (WebSocket, génération code 9 chiffres)
+3. **Phase 2** (✓) : Client Go minimal
+4. **Phase 3** (✓) : Serveur MCP sur le relay
+5. **Phase 4** (✓ primitives) : Exécution cross-platform via `run_shell`/`run_command` (helpers sysadmin dédiés à venir)
+6. **Phase 5** (✓) : Durcissement sécurité (OAuth 2.1 scopé, audit immuable, kill-switch, tokens par-session)
+7. **Phase 6** (✓) : Client portable sans trace (workspace temp auto-nettoyé, `--self-destruct`, build strippé)
+8. **Phase 7** (en cours) : Tests (relay 151 + client 61 verts), observabilité, test d'intégration bout-en-bout relay↔client
 
 Voir [docs/PLAN.md](docs/PLAN.md) pour les détails.
 
@@ -195,7 +222,12 @@ uvicorn app:app --reload --host 0.0.0.0 --port 8000
 ### Lancer les tests
 
 ```bash
-pytest tests/ -v
+# Relay (Python) — 151 tests
+pip install -r relay/requirements.txt
+pytest tests/relay -q
+
+# Client (Go) — 61 tests
+cd client && go test ./...
 ```
 
 ## Licence

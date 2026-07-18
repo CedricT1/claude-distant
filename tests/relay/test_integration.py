@@ -49,6 +49,93 @@ def _connect(port: int, token: str | None = CLIENT_TOKEN):
     return websockets.connect(_uri(port), additional_headers=headers, proxy=None)
 
 
+class TestPerSessionClientAuth:
+    """Mode `CLIENT_AUTH_MODE=per_session` : jeton client court, lié à la session."""
+
+    async def test_shared_mode_is_default_and_unaffected(self, running_app):
+        # Le fixture `running_app` utilise déjà create_app sans client_auth_mode :
+        # comportement `shared` inchangé (voir TestWebSocketRegistration ci-dessous).
+        _app, port = running_app
+        async with _connect(port) as ws:
+            await ws.send(json.dumps({"type": "register", "os": "linux", "hostname": "h", "version": "1"}))
+            reply = json.loads(await ws.recv())
+            assert reply["type"] == "registered"
+
+    async def test_per_session_mode_accepts_issued_token(self):
+        app = create_app(
+            client_token=CLIENT_TOKEN,
+            mcp_bearer_token=MCP_TOKEN,
+            session_ttl_seconds=30,
+            client_auth_mode="per_session",
+        )
+        config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning")
+        server = uvicorn.Server(config)
+        task = asyncio.create_task(server.serve())
+        while not server.started:
+            await asyncio.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        try:
+            issued_token = app.state.client_token_store.issue(ttl_seconds=30)
+            async with _connect(port, token=issued_token) as ws:
+                await ws.send(
+                    json.dumps({"type": "register", "os": "linux", "hostname": "h", "version": "1"})
+                )
+                reply = json.loads(await ws.recv())
+                assert reply["type"] == "registered"
+        finally:
+            server.should_exit = True
+            await task
+
+    async def test_per_session_mode_rejects_shared_client_token(self):
+        app = create_app(
+            client_token=CLIENT_TOKEN,
+            mcp_bearer_token=MCP_TOKEN,
+            session_ttl_seconds=30,
+            client_auth_mode="per_session",
+        )
+        config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning")
+        server = uvicorn.Server(config)
+        task = asyncio.create_task(server.serve())
+        while not server.started:
+            await asyncio.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        try:
+            with pytest.raises(websockets.exceptions.InvalidHandshake):
+                async with _connect(port, token=CLIENT_TOKEN):
+                    pass
+        finally:
+            server.should_exit = True
+            await task
+
+    async def test_per_session_token_is_single_use(self):
+        app = create_app(
+            client_token=CLIENT_TOKEN,
+            mcp_bearer_token=MCP_TOKEN,
+            session_ttl_seconds=30,
+            client_auth_mode="per_session",
+        )
+        config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning")
+        server = uvicorn.Server(config)
+        task = asyncio.create_task(server.serve())
+        while not server.started:
+            await asyncio.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        try:
+            issued_token = app.state.client_token_store.issue(ttl_seconds=30)
+            async with _connect(port, token=issued_token) as ws:
+                await ws.send(
+                    json.dumps({"type": "register", "os": "linux", "hostname": "h", "version": "1"})
+                )
+                await ws.recv()
+
+            with pytest.raises(websockets.exceptions.InvalidHandshake):
+                async with _connect(port, token=issued_token):
+                    pass
+        finally:
+            server.should_exit = True
+            await task
+
+
 class TestWebSocketRegistration:
     async def test_register_receives_nine_digit_code(self, running_app):
         _app, port = running_app

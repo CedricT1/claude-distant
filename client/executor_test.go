@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"runtime"
 	"testing"
 )
 
@@ -125,6 +127,47 @@ func TestBuildShellArgv_PosixUsesDashC(t *testing.T) {
 	args := buildShellArgv(stylePosix, "df -h")
 	if len(args) != 2 || args[0] != "-c" || args[1] != "df -h" {
 		t.Errorf("got %v, want [-c \"df -h\"]", args)
+	}
+}
+
+// Red-first tests for the "sans trace" workspace wiring: spawned commands
+// must default their working directory to the Executor's workDir (the
+// client's scratch Workspace, workspace.go) so anything they write without
+// an absolute path is removed automatically at shutdown.
+
+func TestBuildPlainCommand_SetsWorkingDirectoryToWorkspace(t *testing.T) {
+	e := &Executor{workDir: t.TempDir()}
+	cmd, err := e.buildPlainCommand(context.Background(), "true")
+	if err != nil {
+		t.Fatalf("buildPlainCommand error: %v", err)
+	}
+	if cmd.Dir != e.workDir {
+		t.Errorf("cmd.Dir = %q, want %q", cmd.Dir, e.workDir)
+	}
+}
+
+func TestBuildPlainCommand_EmptyWorkDirLeavesCmdDirUnset(t *testing.T) {
+	e := &Executor{}
+	cmd, err := e.buildPlainCommand(context.Background(), "true")
+	if err != nil {
+		t.Fatalf("buildPlainCommand error: %v", err)
+	}
+	if cmd.Dir != "" {
+		t.Errorf("cmd.Dir = %q, want empty (process's own cwd)", cmd.Dir)
+	}
+}
+
+func TestBuildShellCommand_SetsWorkingDirectoryToWorkspace(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("assumes bash is available, as on linux CI/dev runners")
+	}
+	e := &Executor{workDir: t.TempDir()}
+	cmd, err := e.buildShellCommand(context.Background(), "echo hi", "bash")
+	if err != nil {
+		t.Fatalf("buildShellCommand error: %v", err)
+	}
+	if cmd.Dir != e.workDir {
+		t.Errorf("cmd.Dir = %q, want %q", cmd.Dir, e.workDir)
 	}
 }
 
