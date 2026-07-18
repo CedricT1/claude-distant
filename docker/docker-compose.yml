@@ -1,18 +1,18 @@
-version: '3.9'
-
 services:
   relay:
     build:
       context: ..
       dockerfile: docker/Dockerfile.relay
     container_name: claude-distant-relay
-    # En déploiement TLS (profil `tls`, voir le service `caddy` ci-dessous), ce
-    # port ne doit PAS être publié sur l'hôte : seul Caddy (443) doit être
-    # exposé, le relay reste joignable uniquement via le réseau Docker interne
-    # (`http://relay:8000`, cf. `docker/Caddyfile`). Publié ici par défaut pour
-    # ne rien casser des déploiements existants sans TLS (dev/lab).
-    ports:
-      - "${PORT:-8000}:${PORT:-8000}"
+    # Le relay écoute en HTTP interne sur le réseau Docker uniquement.
+    # Le port n'est pas publié sur l'hôte : seul nginx (port 8080)
+    # doit être exposé en interne. La terminaison TLS est de la
+    # responsabilité du déployeur via un reverse proxy externe.
+    # Pour la compatibilité avec les anciens déploiements sans nginx,
+    # vous pouvez décommenter la ligne ci-dessous et router le port 8000 sur l'hôte
+    # directement (non recommandé en production).
+    # ports:
+    #   - "${PORT:-8000}:${PORT:-8000}"
     environment:
       HOST: ${HOST:-0.0.0.0}
       PORT: ${PORT:-8000}
@@ -45,30 +45,21 @@ services:
     networks:
       - claude-distant-network
 
-  # Reverse proxy TLS strict (Caddy), OPTIONNEL — activer avec le profil `tls` :
-  #   docker-compose -f docker/docker-compose.yml --profile tls up -d
-  # Termine le TLS 1.2+ (redirection https, HSTS, en-têtes de sécurité, cf.
-  # `docker/Caddyfile`) et reproxy en HTTP interne vers `relay:8000`. Le relay
-  # lui-même n'a besoin d'aucune configuration TLS : il ne voit que du HTTP
-  # côté réseau Docker interne. Voir `docs/SECURITY.md` pour le modèle de
-  # menace complet et le détail du choix Caddy vs Nginx.
-  caddy:
-    image: caddy:2-alpine
-    container_name: claude-distant-caddy
-    profiles: ["tls"]
+  # Reverse proxy HTTP-only. Proxies vers relay:8000 sur le réseau interne.
+  # La terminaison TLS est assurée par un reverse proxy externe, de la
+  # responsabilité du déployeur (Caddy, Nginx, Traefik, etc.).
+  # Le déployeur place son propre reverse proxy HTTPS devant ce nginx et
+  # DOIT positionner l'en-tête X-Forwarded-Proto: https lors du forward.
+  # Voir docs/SECURITY.md pour les détails et l'exemple Caddy externe.
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: claude-distant-nginx
     depends_on:
       - relay
     ports:
-      - "80:80"
-      - "443:443"
-    environment:
-      TLS_DOMAIN: ${TLS_DOMAIN:-relay.example.com}
-    env_file:
-      - .env
+      - "${HTTP_PORT:-8080}:8080"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
     restart: unless-stopped
     networks:
       - claude-distant-network
@@ -77,6 +68,3 @@ networks:
   claude-distant-network:
     driver: bridge
 
-volumes:
-  caddy_data:
-  caddy_config:
