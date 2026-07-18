@@ -8,7 +8,12 @@ et du vrai broker (déjà testé dans test_broker.py).
 """
 import json
 
-from relay.broker import ClientDisconnectedError, CommandTimeoutError, SessionNotFoundError
+from relay.broker import (
+    ClientDisconnectedError,
+    CommandDeniedError,
+    CommandTimeoutError,
+    SessionNotFoundError,
+)
 from relay.mcp_server import create_mcp_server
 from relay.session_store import SessionRecord
 
@@ -145,6 +150,14 @@ class TestErrorHandling:
         mcp = create_mcp_server(broker)
         result = await call_tool(mcp, "run_command", {"session_code": "0", "command": "x"})
         assert result["error"] == "timeout"
+
+    async def test_command_denied_error(self):
+        broker = StubBroker()
+        broker.error = CommandDeniedError("commande refusée par la denylist")
+        mcp = create_mcp_server(broker)
+        result = await call_tool(mcp, "run_command", {"session_code": "0", "command": "rm -rf /"})
+        assert result["status"] == "error"
+        assert result["error"] == "denied"
 
 
 class TestSystemInfo:

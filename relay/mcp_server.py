@@ -1,12 +1,15 @@
-"""Serveur MCP (Streamable HTTP) exposant les 4 outils MVP au harnais.
+"""Serveur MCP (Streamable HTTP) exposant les outils au harnais : `connect_session`,
+`system_info`, `run_command`, `run_shell` (MVP) et `terminate_session` (kill-switch,
+phase 5).
 
 Utilise le **SDK MCP officiel** (`mcp.server.fastmcp.FastMCP`) pour la
 définition des outils et le transport Streamable HTTP — voir
 `FastMCP.streamable_http_app()`. Cette couche ne connaît rien du réseau
 client↔relay : elle appelle uniquement `broker.dispatch_command(...)` /
-`broker.get_session_info(...)` (voir `broker.py`) et traduit les
-chunks `stream`/`result` agrégés en un dict de résultat structuré pour
-l'outil.
+`broker.get_session_info(...)` / `broker.terminate_session(...)` (voir
+`broker.py`) et traduit les chunks `stream`/`result` agrégés (ou les
+exceptions du protocole, dont `CommandDeniedError` — refus par
+`CommandPolicy`, phase 5) en un dict de résultat structuré pour l'outil.
 
 ## Auth Bearer
 
@@ -18,12 +21,18 @@ métadonnées `.well-known/oauth-protected-resource`, scopes, etc.) — trop
 lourd pour un simple jeton statique de MVP, mais c'est le point d'entrée
 officiel prévu pour la suite.
 
-TODO (phase 5 du plan — durcissement / OAuth 2.1) :
+TODO (phase 5 du plan — durcissement / OAuth 2.1, reste à faire) :
   - remplacer `BearerAuthMiddleware` par `mcp.server.auth` :
     `FastMCP(auth=AuthSettings(...), token_verifier=MonTokenVerifier())` où
     `MonTokenVerifier` implémente `mcp.server.auth.provider.TokenVerifier`
     (`async def verify_token(self, token: str) -> AccessToken | None`).
-  - jetons de session courts par session (au lieu d'un jeton MCP unique).
+  - jetons de session courts par session côté **harnais/MCP** : ce module ne
+    couvre que l'auth Bearer MCP (jeton unique). Le jeton court par-session
+    **côté client WS** (`CLIENT_AUTH_MODE=per_session`) est déjà implémenté
+    dans `relay/auth.py` (`PerSessionTokenStore`) et `relay/app.py`, mais rien
+    n'expose encore d'outil MCP pour l'émettre (ex. `issue_client_token`) —
+    l'émission se fait pour l'instant en appelant directement
+    `PerSessionTokenStore.issue(...)` côté déploiement/opérateur.
 """
 from __future__ import annotations
 
@@ -34,7 +43,13 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .auth import extract_bearer_token, verify_token
-from .broker import Broker, ClientDisconnectedError, CommandTimeoutError, SessionNotFoundError
+from .broker import (
+    Broker,
+    ClientDisconnectedError,
+    CommandDeniedError,
+    CommandTimeoutError,
+    SessionNotFoundError,
+)
 
 SERVER_NAME = "claude-distant-relay"
 
@@ -98,6 +113,18 @@ def create_mcp_server(broker: Broker) -> FastMCP:
             timeout=timeout,
         )
 
+    @mcp.tool()
+    async def terminate_session(session_code: str) -> dict[str, Any]:
+        """Kill-switch : invalide immédiatement une session active.
+
+        Ferme/notifie la connexion client WS et fait échouer proprement toute
+        commande en cours pour cette session (cf. `Broker.terminate_session`).
+        """
+        terminated = await broker.terminate_session(session_code)
+        if not terminated:
+            return {"status": "not_found", "session_code": session_code}
+        return {"status": "terminated", "session_code": session_code}
+
     return mcp
 
 
@@ -142,6 +169,8 @@ async def _dispatch_and_aggregate(
         return {"status": "error", "error": "client_disconnected", "detail": str(exc)}
     except CommandTimeoutError as exc:
         return {"status": "error", "error": "timeout", "detail": str(exc)}
+    except CommandDeniedError as exc:
+        return {"status": "error", "error": "denied", "detail": str(exc)}
 
     return {
         "status": "ok",
