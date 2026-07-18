@@ -21,19 +21,27 @@ go vet ./...             # analyse statique
 go test ./...             # tests unitaires
 ```
 
-### Build cross-plateforme
+### Build cross-plateforme (binaires de distribution)
+
+Voir `Makefile` et [`docs/PACKAGING.md`](../docs/PACKAGING.md) pour la
+procédure complète (build reproductible, checksums, signature). En bref :
 
 ```sh
-# Linux amd64
-GOOS=linux   GOARCH=amd64 go build -o dist/claude-distant-client-linux-amd64 .
-
-# Windows amd64
-GOOS=windows GOARCH=amd64 go build -o dist/claude-distant-client-windows-amd64.exe .
+make dist       # linux/amd64, linux/arm64, windows/amd64 -> dist/
+make checksums  # dist/SHA256SUMS
 ```
 
-Le binaire résultant est autonome (statique) : il peut être copié et lancé
-directement depuis un dossier temporaire sur la machine cible, sans
-installation, service, clé de registre ni autostart.
+Équivalent manuel pour une seule cible (ex. Linux amd64) :
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+  -trimpath -ldflags "-s -w -X main.version=$(git describe --tags --always)" \
+  -o dist/claude-distant-client-linux-amd64 .
+```
+
+Le binaire résultant est autonome (statique, `CGO_ENABLED=0`, strippé) : il
+peut être copié et lancé directement depuis un dossier temporaire sur la
+machine cible, sans installation, service, clé de registre ni autostart.
 
 ## Utilisation
 
@@ -52,8 +60,10 @@ installation, service, clé de registre ni autostart.
 | `--token` | `CLAUDE_DISTANT_TOKEN` | — (requis) | Jeton Bearer pré-configuré |
 | `--policy` | `CLAUDE_DISTANT_POLICY` | `confirm` | Garde-fou : `auto` \| `confirm` \| `deny` |
 | `--insecure-skip-verify` | — | `false` | Désactive la vérification TLS (dev uniquement, jamais en production) |
+| `--self-destruct` | `CLAUDE_DISTANT_SELF_DESTRUCT` | `false` | À l'arrêt propre, supprime aussi le binaire lui-même (best-effort). Voir `docs/PACKAGING.md` §1 |
 
 Un flag l'emporte toujours sur la variable d'environnement correspondante.
+`CLAUDE_DISTANT_SELF_DESTRUCT` accepte `1`/`true`/`yes`/`on` (insensible à la casse) comme valeurs activantes.
 
 Au démarrage, le client :
 1. se connecte au relay et envoie `register` (OS détecté, hostname, version) ;
@@ -110,18 +120,37 @@ Windows), et `result` est renvoyé avec `error:"timeout"`.
 
 | Fichier | Rôle |
 |---|---|
-| `main.go` | flags/env (`parseConfig`), boucle de connexion/reconnexion, affichage du code de session |
+| `main.go` | flags/env (`parseConfig`), boucle de connexion/reconnexion, affichage du code de session, orchestration de l'arrêt propre |
 | `wsconn.go` | connexion WebSocket (dial, JSON I/O thread-safe, deadlines) |
-| `executor.go` | exécution `run_shell`/`run_command` (sélection d'interpréteur, streaming, timeout) |
+| `executor.go` | exécution `run_shell`/`run_command` (sélection d'interpréteur, streaming, timeout, répertoire de travail = workspace) |
 | `sysinfo.go` (+ `sysinfo_linux.go`, `sysinfo_windows.go`) | `system_info` cross-plateforme |
 | `proc_linux.go`, `proc_windows.go` | démarrage/arrêt de l'arbre de processus par OS |
 | `policy.go` | garde-fou local (classification destructive + invite `confirm`) |
 | `protocol.go` | types Go des messages du protocole |
-| `*_test.go` | tests unitaires (sérialisation protocole, sélection de shell, classification destructive, parsing des flags) |
+| `workspace.go` | répertoire de travail temporaire dédié (`NewWorkspace`/`Cleanup`), « sans trace » |
+| `lifecycle.go` | `RunGuarded` : garantit le nettoyage à la sortie, y compris sur panic |
+| `secrets.go` | `SecretBytes` : effacement best-effort des secrets (token) en mémoire |
+| `selfdestruct.go` | `--self-destruct` : suppression best-effort du binaire lui-même à l'arrêt |
+| `*_test.go` | tests unitaires (sérialisation protocole, sélection de shell, classification destructive, parsing des flags, workspace/self-destruct/secrets) |
 
 ## Sans trace
 
 Le client ne s'installe pas : pas de service, pas de clé de registre, pas
-d'autostart. Il ne crée aucun fichier temporaire propre à son
-fonctionnement ; un arrêt (Ctrl-C ou signal) ferme proprement la connexion
-WebSocket (frame de fermeture) avant de quitter.
+d'autostart. Voir `docs/PACKAGING.md` pour le détail complet du modèle
+« sans trace » et le build portable ; en résumé :
+
+- **Aucun log sur disque par défaut** : toute la sortie va sur la console
+  (stdout/stderr) uniquement.
+- **Répertoire de travail temporaire dédié** (`workspace.go`,
+  `os.MkdirTemp`), utilisé comme répertoire de travail des commandes
+  exécutées (`run_shell`/`run_command`), **supprimé intégralement** à la
+  sortie — arrêt propre, Ctrl-C/SIGTERM, ou panic (`lifecycle.go:RunGuarded`).
+- **Secrets effacés en mémoire** (`secrets.go:SecretBytes.Zero()`) : le
+  jeton Bearer n'est jamais stocké en `string` Go immuable, et est écrasé
+  par des zéros à la sortie.
+- **`--self-destruct` (désactivé par défaut)** : supprime aussi le binaire
+  lui-même à l'arrêt (best-effort ; direct sous Linux, via un script
+  détaché sous Windows — voir `selfdestruct.go` et `docs/PACKAGING.md` §1).
+
+Un arrêt (Ctrl-C ou signal) ferme proprement la connexion WebSocket (frame
+de fermeture) avant de quitter.

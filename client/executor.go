@@ -162,13 +162,24 @@ type Executor struct {
 	conn    *Conn
 	policy  Policy
 	confirm func(command string) bool
+	// workDir is the client's dedicated scratch Workspace directory
+	// (workspace.go). Spawned commands default their working directory
+	// here so that anything they write without an absolute path lands
+	// inside the workspace and is removed automatically at Cleanup() —
+	// part of the "sans trace" guarantee (docs/PLAN.md Phase 6). Empty
+	// means "use the process's own current directory" (exec.Cmd's normal
+	// default), which keeps this backward compatible for callers that
+	// don't have a workspace (e.g. existing tests).
+	workDir string
 }
 
 // NewExecutor builds an Executor. confirm is invoked only when policy is
 // PolicyConfirm and the command is classified destructive; it should block
-// until the local operator answers.
-func NewExecutor(conn *Conn, policy Policy, confirm func(command string) bool) *Executor {
-	return &Executor{conn: conn, policy: policy, confirm: confirm}
+// until the local operator answers. workDir is the working directory
+// spawned commands run in (see the Executor.workDir field doc); pass "" to
+// fall back to the process's current directory.
+func NewExecutor(conn *Conn, policy Policy, confirm func(command string) bool, workDir string) *Executor {
+	return &Executor{conn: conn, policy: policy, confirm: confirm, workDir: workDir}
 }
 
 // Handle dispatches a single `command` message to the right tool. It always
@@ -234,7 +245,7 @@ func (e *Executor) runShellOrCommand(ctx context.Context, cmd CommandMessage, us
 	if useShell {
 		execCmd, err = e.buildShellCommand(runCtx, p.Command, p.Shell)
 	} else {
-		execCmd, err = buildPlainCommand(runCtx, p.Command)
+		execCmd, err = e.buildPlainCommand(runCtx, p.Command)
 	}
 	if err != nil {
 		e.sendResult(cmd.RequestID, 1, err.Error())
@@ -266,10 +277,11 @@ func (e *Executor) buildShellCommand(ctx context.Context, command, shellOverride
 		// generation, unlike en_US.UTF-8.
 		c.Env = append(os.Environ(), "LANG=C.UTF-8", "LC_ALL=C.UTF-8")
 	}
+	c.Dir = e.workDir
 	return c, nil
 }
 
-func buildPlainCommand(ctx context.Context, command string) (*exec.Cmd, error) {
+func (e *Executor) buildPlainCommand(ctx context.Context, command string) (*exec.Cmd, error) {
 	args, err := splitArgv(command)
 	if err != nil {
 		return nil, err
@@ -280,7 +292,9 @@ func buildPlainCommand(ctx context.Context, command string) (*exec.Cmd, error) {
 	if _, err := exec.LookPath(args[0]); err != nil {
 		return nil, fmt.Errorf("exécutable introuvable: %s", args[0])
 	}
-	return exec.CommandContext(ctx, args[0], args[1:]...), nil
+	c := exec.CommandContext(ctx, args[0], args[1:]...)
+	c.Dir = e.workDir
+	return c, nil
 }
 
 // runAndStream starts cmd, streams its stdout/stderr as `stream` messages,

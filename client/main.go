@@ -17,8 +17,10 @@ import (
 )
 
 // version is reported to the relay in the `register` message and printed
-// at startup.
-const version = "0.1.0"
+// at startup. It is a var (not a const) so a release build can stamp it at
+// link time via `-ldflags "-X main.version=..."` (see client/Makefile and
+// docs/PACKAGING.md) without touching this source file.
+var version = "0.1.0"
 
 const (
 	heartbeatInterval = 20 * time.Second
@@ -27,16 +29,28 @@ const (
 )
 
 // config holds the fully-resolved client configuration, whatever the source
-// (flag or environment variable) of each value.
+// (flag or environment variable) of each value. token is a *SecretBytes
+// (not a plain string) so it can be zeroized in memory at shutdown — part
+// of the "sans trace" runtime (docs/PLAN.md Phase 6).
 type config struct {
-	url      string
-	token    string
-	policy   Policy
-	insecure bool
+	url          string
+	token        *SecretBytes
+	policy       Policy
+	insecure     bool
+	selfDestruct bool
 }
 
 func main() {
 	cfg, err := parseConfig(os.Args[1:], os.Getenv)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "claude-distant-client:", err)
+		os.Exit(2)
+	}
+
+	// Dedicated scratch directory for anything the client needs to write
+	// to disk; removed in full at shutdown (see the RunGuarded call
+	// below), including on panic. See workspace.go.
+	ws, err := NewWorkspace()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "claude-distant-client:", err)
 		os.Exit(2)
@@ -48,11 +62,43 @@ func main() {
 	fmt.Printf("claude-distant client v%s (%s/%s) — policy=%s\n", version, runtime.GOOS, runtime.GOARCH, cfg.policy)
 	fmt.Println("Connexion au relay...")
 
-	if err := runForever(ctx, cfg); err != nil && err != context.Canceled {
-		fmt.Fprintln(os.Stderr, "claude-distant-client: arrêt:", err)
+	// RunGuarded guarantees the cleanup below runs exactly once no matter
+	// how runForever exits — clean return, error return, or panic — so
+	// the workspace is always removed and the token always zeroized, and
+	// (opt-in) the binary itself is always deleted.
+	var runErr error
+	RunGuarded(func() {
+		ws.Cleanup()
+		cfg.token.Zero()
+		if cfg.selfDestruct {
+			selfDestructSelf()
+		}
+	}, func() {
+		runErr = runForever(ctx, cfg, ws)
+	})
+
+	if runErr != nil && runErr != context.Canceled {
+		fmt.Fprintln(os.Stderr, "claude-distant-client: arrêt:", runErr)
 		os.Exit(1)
 	}
 	fmt.Println("Arrêt propre du client.")
+}
+
+// selfDestructSelf resolves the running binary's own path and best-effort
+// deletes it (see selfdestruct.go). Failures are reported but never fatal:
+// self-destruct is a best-effort convenience, not a security boundary, and
+// must never prevent an otherwise-clean shutdown.
+func selfDestructSelf() {
+	path, err := resolveExecutablePath(os.Executable)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "claude-distant-client: self-destruct: chemin introuvable:", err)
+		return
+	}
+	if err := selfDestruct(runtime.GOOS, path, os.Getpid()); err != nil {
+		fmt.Fprintln(os.Stderr, "claude-distant-client: self-destruct: suppression échouée:", err)
+		return
+	}
+	fmt.Println("Self-destruct: binaire supprimé.")
 }
 
 // parseConfig resolves flags and environment variables into a config, with
@@ -67,6 +113,7 @@ func parseConfig(args []string, getenv func(string) string) (config, error) {
 	tokenFlag := fs.String("token", "", "Jeton Bearer pré-configuré du client")
 	policyFlag := fs.String("policy", "", "Politique de garde-fou : auto|confirm|deny")
 	insecureFlag := fs.Bool("insecure-skip-verify", false, "Désactive la vérification TLS (développement uniquement)")
+	selfDestructFlag := fs.Bool("self-destruct", false, "Supprime le binaire lui-même à l'arrêt propre (best-effort, désactivé par défaut)")
 
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
@@ -100,19 +147,25 @@ func parseConfig(args []string, getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 
-	return config{url: url, token: token, policy: policy, insecure: *insecureFlag}, nil
+	return config{
+		url:          url,
+		token:        NewSecret(token),
+		policy:       policy,
+		insecure:     *insecureFlag,
+		selfDestruct: selfDestructEnabled(*selfDestructFlag, getenv),
+	}, nil
 }
 
 // runForever maintains the connection to the relay, reconnecting with
 // exponential backoff (with jitter) until ctx is cancelled (e.g. Ctrl-C).
-func runForever(ctx context.Context, cfg config) error {
+func runForever(ctx context.Context, cfg config, ws *Workspace) error {
 	backoff := minBackoff
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
-		err := runSession(ctx, cfg)
+		err := runSession(ctx, cfg, ws)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -143,8 +196,8 @@ func jitter(d time.Duration) time.Duration {
 
 // runSession opens one WebSocket connection, registers, and processes
 // messages until the connection drops or ctx is cancelled.
-func runSession(ctx context.Context, cfg config) error {
-	conn, err := DialRelay(ctx, cfg.url, cfg.token, cfg.insecure)
+func runSession(ctx context.Context, cfg config, ws *Workspace) error {
+	conn, err := DialRelay(ctx, cfg.url, cfg.token.String(), cfg.insecure)
 	if err != nil {
 		return err
 	}
@@ -167,7 +220,7 @@ func runSession(ctx context.Context, cfg config) error {
 
 	stdin := bufio.NewReader(os.Stdin)
 	confirmFn := func(command string) bool { return PromptConfirm(stdin, command) }
-	executor := NewExecutor(conn, cfg.policy, confirmFn)
+	executor := NewExecutor(conn, cfg.policy, confirmFn, ws.Dir())
 
 	go heartbeatLoop(sessionCtx, conn)
 

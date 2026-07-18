@@ -41,8 +41,8 @@ func TestParseConfig_FlagsTakePrecedence(t *testing.T) {
 	if cfg.url != "wss://flag.example.com/ws/client" {
 		t.Errorf("url = %q, want flag value", cfg.url)
 	}
-	if cfg.token != "flagtoken" {
-		t.Errorf("token = %q, want flag value", cfg.token)
+	if cfg.token.String() != "flagtoken" {
+		t.Errorf("token = %q, want flag value", cfg.token.String())
 	}
 	if cfg.policy != PolicyDeny {
 		t.Errorf("policy = %v, want %v", cfg.policy, PolicyDeny)
@@ -60,8 +60,8 @@ func TestParseConfig_FallsBackToEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.url != "wss://env.example.com/ws/client" || cfg.token != "envtoken" {
-		t.Errorf("got %+v, want values from env", cfg)
+	if cfg.url != "wss://env.example.com/ws/client" || cfg.token.String() != "envtoken" {
+		t.Errorf("got url=%q token=%q, want values from env", cfg.url, cfg.token.String())
 	}
 }
 
@@ -102,6 +102,39 @@ func TestParseConfig_InsecureFlagCanBeSet(t *testing.T) {
 	}
 	if !cfg.insecure {
 		t.Error("insecure = false, want true")
+	}
+}
+
+func TestParseConfig_SelfDestructDefaultsFalse(t *testing.T) {
+	cfg, err := parseConfig([]string{"-url=wss://x/ws/client", "-token=t"}, noEnv)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.selfDestruct {
+		t.Error("selfDestruct = true, want false by default")
+	}
+}
+
+func TestParseConfig_SelfDestructFlagEnables(t *testing.T) {
+	cfg, err := parseConfig([]string{"-url=wss://x/ws/client", "-token=t", "-self-destruct"}, noEnv)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.selfDestruct {
+		t.Error("selfDestruct = false, want true when --self-destruct is set")
+	}
+}
+
+func TestParseConfig_SelfDestructEnvEnables(t *testing.T) {
+	cfg, err := parseConfig(
+		[]string{"-url=wss://x/ws/client", "-token=t"},
+		envMap(map[string]string{"CLAUDE_DISTANT_SELF_DESTRUCT": "true"}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.selfDestruct {
+		t.Error("selfDestruct = false, want true when CLAUDE_DISTANT_SELF_DESTRUCT=true")
 	}
 }
 
