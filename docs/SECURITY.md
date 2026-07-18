@@ -36,33 +36,97 @@ ce canal, ou compromission du poste opérateur du harnais — ce sont les
 frontières de confiance du système, pas des failles qu'un durcissement du
 relay peut combler.
 
-## 2. TLS strict
+## 2. TLS strict (terminaison externe)
 
-Le relay (`uvicorn`) écoute en **HTTP interne** ; il ne termine jamais le TLS
-lui-même en production. Un reverse proxy dédié fait la terminaison TLS et
-reproxy en clair vers `relay:8000` sur le réseau Docker interne — voir
-`docker/docker-compose.yml` (service `caddy`, profil `tls`,
-`docker-compose --profile tls up -d`) et `docker/Caddyfile`.
+Le relay (`uvicorn`) écoute en **HTTP interne** uniquement ; il ne termine
+jamais le TLS lui-même. La stack Docker expose un reverse proxy **nginx HTTP-only**
+(port 8080, réseau interne) qui proxies vers `relay:8000`.
 
-- **Caddy** (fourni, `docker/Caddyfile`) : TLS 1.2/1.3 uniquement, HSTS
-  (`max-age=31536000; includeSubDomains`), `X-Content-Type-Options: nosniff`,
-  `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, redirection
-  automatique HTTP→HTTPS, certificats Let's Encrypt auto-renouvelés pour
-  `TLS_DOMAIN`.
-- **Nginx** (alternative, `docker/nginx.conf.example`) : mêmes garanties,
-  pour qui gère déjà ses propres certificats plutôt que l'ACME automatique.
+La **terminaison TLS est assurée par un reverse proxy externe**, de la
+responsabilité du déployeur (Caddy, Nginx, Traefik, etc.). Le déployeur
+place son propre reverse proxy HTTPS devant la stack et forward vers le
+port nginx HTTP (8080).
 
-Dans les deux cas, le proxy doit **préserver l'upgrade WebSocket**
-(`Connection: Upgrade`, cf. `/ws/client`) et **désactiver le buffering de
-réponse** (streaming SSE du transport MCP Streamable HTTP, `/mcp`) :
-`flush_interval -1` (Caddy) / `proxy_buffering off` (Nginx).
+### Configuration du proxy TLS externe
 
-En déploiement TLS, **seul le proxy (443)** doit être exposé publiquement ;
-le port du relay (`PORT`, défaut 8000) ne doit pas être publié sur l'hôte
-(voir commentaire dans `docker-compose.yml`).
+Le reverse proxy externe DOIT :
+
+1. **Terminer le TLS 1.2+** (HTTPS, port 443)
+2. **Forward le trafic** vers `nginx:8080` (ou `localhost:8080` s'il est sur le même hôte)
+3. **Positionner les en-têtes** : `Host`, `X-Real-IP`, `X-Forwarded-For`, 
+   `X-Forwarded-Proto: https`, `X-Forwarded-Host`
+4. **Préserver l'upgrade WebSocket** (`Upgrade` / `Connection` headers)
+5. **Désactiver le buffering de réponse** (streaming SSE du transport MCP Streamable HTTP)
+6. Optionnellement, ajouter les en-têtes de sécurité stricts :
+   - `Strict-Transport-Security: max-age=31536000; includeSubDomains`
+   - `X-Content-Type-Options: nosniff`
+   - `X-Frame-Options: DENY`
+   - `Referrer-Policy: no-referrer`
+
+**Important** : l'en-tête `X-Forwarded-Proto: https` doit TOUJOURS être
+positionné par le proxy externe, pour que le relay génère des URLs en `https://`
+pour les métadonnées OAuth RFC 9728 (mode `MCP_AUTH_MODE=oauth`). Voir la section 3 ci-dessous.
+
+### Exemple : Caddy externe
+
+```caddy
+relay.example.com {
+    tls {
+        protocols tls1.2 tls1.3
+    }
+
+    encode gzip zstd
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        -Server
+    }
+
+    reverse_proxy localhost:8080 {
+        flush_interval -1
+        header_up X-Forwarded-Proto https
+    }
+}
+```
+
+(Remplacer `localhost:8080` par l'adresse de la machine hôte si le Caddy
+est sur une machine différente.)
+
+### Exemple : Nginx externe
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name relay.example.com;
+
+    ssl_certificate /etc/nginx/tls/cert.pem;
+    ssl_certificate_key /etc/nginx/tls/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+
+    location / {
+        proxy_pass http://localhost:8080;  # ou l'adresse de la machine hôte
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+    }
+}
+```
 
 Le client Go distant se connecte toujours en `wss://` (jamais `ws://` en
-production) — c'est déjà l'invariant documenté dans `docs/PROTOCOL.md`/`README.md`.
+production) — c'est l'invariant documenté dans `docs/PROTOCOL.md`/`README.md`.
 
 ## 3. Authentification MCP (harnais ↔ relay)
 
