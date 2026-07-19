@@ -242,7 +242,16 @@ func runSession(ctx context.Context, cfg config, ws *Workspace) error {
 				log.Printf("message command invalide: %v", jsonErr)
 				continue
 			}
-			executor.Handle(sessionCtx, m)
+			// Exécuter la commande dans une goroutine : la boucle de
+			// lecture DOIT rester libre de lire les autres messages du
+			// relay pendant l'exécution. Sinon, une commande longue bloque
+			// la lecture des `heartbeat_ack`, le read deadline (wsconn.go)
+			// finit par expirer et la connexion tombe — et un éventuel
+			// prompt de confirmation (policy=confirm) gèlerait tout le
+			// canal. Handle n'a pas d'état partagé mutable et écrit via
+			// conn.WriteJSON (protégé par mutex), donc l'exécution
+			// concurrente de plusieurs commandes est sûre.
+			go executor.Handle(sessionCtx, m)
 		case TypeHeartbeatAck:
 			// no-op: ReadEnvelope already refreshed the read deadline.
 		default:

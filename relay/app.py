@@ -19,6 +19,9 @@ Variables d'environnement :
   - `SESSION_TTL_SECONDS` : TTL par défaut d'un code de session (défaut 1800).
     Sert aussi de TTL par défaut pour les jetons émis par l'outil MCP
     `issue_client_token` (mode `CLIENT_AUTH_MODE=per_session`).
+  - `COMMAND_TIMEOUT_SECONDS` : délai max sans aucun message du client
+    (stream/result) avant d'abandonner une commande (défaut 300 ; aligné sur le
+    timeout d'exécution par défaut du client Go, voir `relay/broker.py`).
   - `CLIENT_AUTH_MODE` : `shared` (défaut, jeton unique pré-partagé) ou
     `per_session` (jeton court à usage unique, TTL = TTL de session — voir
     `relay/auth.py`). L'émission se fait via l'outil MCP `issue_client_token`
@@ -54,6 +57,12 @@ from .mcp_server import build_mcp_asgi_app
 from .session_store import InMemorySessionStore
 
 DEFAULT_SESSION_TTL_SECONDS = 1800
+# Timeout inter-chunk : délai max sans *aucun* message (stream/result) du client
+# avant d'abandonner une commande. Aligné sur le timeout d'exécution par défaut
+# du client Go (defaultCommandTimeout = 5 min, cf. client/executor.go) pour ne
+# pas abandonner côté harnais une commande longue mais silencieuse (ex. un check
+# disque). Surchargeable via COMMAND_TIMEOUT_SECONDS.
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 300.0
 DEFAULT_CLIENT_AUTH_MODE = "shared"
 DEFAULT_MCP_AUTH_MODE = "static_bearer"
 WS_AUTH_FAILED_CLOSE_CODE = 4401  # code custom (plage 4000-4999), miroir du 401 HTTP
@@ -81,6 +90,7 @@ def create_app(
     client_auth_mode: str = DEFAULT_CLIENT_AUTH_MODE,
     command_policy: CommandPolicy | None = None,
     audit_log: AuditLog | None = None,
+    command_timeout_seconds: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
     mcp_auth_mode: str = DEFAULT_MCP_AUTH_MODE,
     mcp_jwt_secret: str | None = None,
     mcp_jwt_algorithm: str = DEFAULT_MCP_JWT_ALGORITHM,
@@ -110,6 +120,7 @@ def create_app(
     broker = Broker(
         session_store=session_store,
         default_ttl_seconds=session_ttl_seconds,
+        command_timeout=command_timeout_seconds,
         command_policy=command_policy,
         audit_log=audit_log,
     )
@@ -217,6 +228,9 @@ def create_app(
 CLIENT_TOKEN = os.environ.get("CLIENT_TOKEN", "")
 MCP_BEARER_TOKEN = os.environ.get("MCP_BEARER_TOKEN", "")
 SESSION_TTL_SECONDS = float(os.environ.get("SESSION_TTL_SECONDS", str(DEFAULT_SESSION_TTL_SECONDS)))
+COMMAND_TIMEOUT_SECONDS = float(
+    os.environ.get("COMMAND_TIMEOUT_SECONDS", str(DEFAULT_COMMAND_TIMEOUT_SECONDS))
+)
 CLIENT_AUTH_MODE = os.environ.get("CLIENT_AUTH_MODE", DEFAULT_CLIENT_AUTH_MODE)
 MCP_AUTH_MODE = os.environ.get("MCP_AUTH_MODE", DEFAULT_MCP_AUTH_MODE)
 MCP_JWT_SECRET = os.environ.get("MCP_JWT_SECRET") or None
@@ -236,6 +250,7 @@ app = create_app(
     mcp_bearer_token=MCP_BEARER_TOKEN,
     session_ttl_seconds=SESSION_TTL_SECONDS,
     client_auth_mode=CLIENT_AUTH_MODE,
+    command_timeout_seconds=COMMAND_TIMEOUT_SECONDS,
     command_policy=CommandPolicy.from_env(),
     audit_log=AuditLog(),
     mcp_auth_mode=MCP_AUTH_MODE,
