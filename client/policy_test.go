@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"bufio"
+	"strings"
+	"testing"
+)
 
 // Red-first tests for the local guard-rail: policy parsing and the
 // destructive-command classifier (policy.go does not exist yet).
@@ -67,5 +71,37 @@ func TestIsDestructive_LeavesSafeCommandsAlone(t *testing.T) {
 		if IsDestructive(cmd) {
 			t.Errorf("IsDestructive(%q) = true, want false", cmd)
 		}
+	}
+}
+
+func TestPromptConfirm_Answers(t *testing.T) {
+	cases := map[string]struct {
+		wantApproved bool
+		wantAlways   bool
+	}{
+		"o\n":              {true, false},
+		"oui\n":            {true, false},
+		"y\n":              {true, false},
+		"Yes\n":            {true, false},
+		"t\n":              {true, true},
+		"toujours\n":       {true, true},
+		"ALWAYS\n":         {true, true},
+		"n\n":              {false, false},
+		"\n":               {false, false},
+		"n'importe quoi\n": {false, false},
+	}
+	for input, want := range cases {
+		approved, always := PromptConfirm(bufio.NewReader(strings.NewReader(input)), "rm -rf /tmp/x")
+		if approved != want.wantApproved || always != want.wantAlways {
+			t.Errorf("PromptConfirm(%q) = (approved=%v, always=%v), want (%v, %v)",
+				input, approved, always, want.wantApproved, want.wantAlways)
+		}
+	}
+}
+
+func TestPromptConfirm_EOFDenies(t *testing.T) {
+	approved, always := PromptConfirm(bufio.NewReader(strings.NewReader("")), "rm -rf /tmp/x")
+	if approved || always {
+		t.Errorf("PromptConfirm on EOF = (%v, %v), want (false, false)", approved, always)
 	}
 }

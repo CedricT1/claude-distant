@@ -90,16 +90,25 @@ func IsDestructive(command string) bool {
 }
 
 // PromptConfirm shows the local guard-rail prompt described in
-// docs/PROTOCOL.md and blocks until the operator answers.
-func PromptConfirm(stdin *bufio.Reader, command string) bool {
+// docs/PROTOCOL.md and blocks until the operator answers. always reports
+// whether the operator chose "toujours" (approve this exact command
+// without prompting again for the rest of the session); it is only ever
+// true when approved is also true.
+func PromptConfirm(stdin *bufio.Reader, command string) (approved bool, always bool) {
 	fmt.Println()
 	fmt.Println("----------------------------------------")
 	fmt.Printf("Le harnais veut exécuter :\n  %s\n", command)
-	fmt.Print("[Autoriser/Refuser] (o/N) : ")
+	fmt.Print("[Autoriser/Refuser/Toujours] (o/N/t) : ")
 	line, err := stdin.ReadString('\n')
 	if err != nil {
-		return false
+		return false, false
 	}
-	answer := strings.ToLower(strings.TrimSpace(line))
-	return answer == "o" || answer == "oui" || answer == "y" || answer == "yes"
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "o", "oui", "y", "yes":
+		return true, false
+	case "t", "toujours", "always", "a":
+		return true, true
+	default:
+		return false, false
+	}
 }

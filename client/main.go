@@ -219,7 +219,7 @@ func runSession(ctx context.Context, cfg config, ws *Workspace) error {
 	}()
 
 	stdin := bufio.NewReader(os.Stdin)
-	confirmFn := func(command string) bool { return PromptConfirm(stdin, command) }
+	confirmFn := func(command string) (bool, bool) { return PromptConfirm(stdin, command) }
 	executor := NewExecutor(conn, cfg.policy, confirmFn, ws.Dir())
 
 	go heartbeatLoop(sessionCtx, conn)
@@ -248,9 +248,11 @@ func runSession(ctx context.Context, cfg config, ws *Workspace) error {
 			// la lecture des `heartbeat_ack`, le read deadline (wsconn.go)
 			// finit par expirer et la connexion tombe — et un éventuel
 			// prompt de confirmation (policy=confirm) gèlerait tout le
-			// canal. Handle n'a pas d'état partagé mutable et écrit via
-			// conn.WriteJSON (protégé par mutex), donc l'exécution
-			// concurrente de plusieurs commandes est sûre.
+			// canal. Le seul état partagé mutable de Handle (la liste des
+			// commandes "toujours autorisées") est protégé par mutex, et
+			// l'écriture passe par conn.WriteJSON (protégé par mutex lui
+			// aussi), donc l'exécution concurrente de plusieurs commandes
+			// est sûre.
 			go executor.Handle(sessionCtx, m)
 		case TypeHeartbeatAck:
 			// no-op: ReadEnvelope already refreshed the read deadline.

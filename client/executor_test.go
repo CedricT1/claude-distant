@@ -171,6 +171,61 @@ func TestBuildShellCommand_SetsWorkingDirectoryToWorkspace(t *testing.T) {
 	}
 }
 
+// Red-first tests for the "toujours autoriser" guard-rail memory: once the
+// operator approves a destructive command with "always", the exact same
+// command string must not prompt again for the rest of the session.
+
+func TestExecutor_AlwaysAllowedRemembersExactCommand(t *testing.T) {
+	e := NewExecutor(nil, PolicyConfirm, nil, "")
+	if e.isAlwaysAllowed("rm -rf /tmp/x") {
+		t.Fatal("isAlwaysAllowed = true before any approval, want false")
+	}
+	e.rememberAlwaysAllowed("rm -rf /tmp/x")
+	if !e.isAlwaysAllowed("rm -rf /tmp/x") {
+		t.Error("isAlwaysAllowed = false after rememberAlwaysAllowed, want true")
+	}
+	if e.isAlwaysAllowed("rm -rf /tmp/y") {
+		t.Error("isAlwaysAllowed = true for a different command, want false (matching is exact-string only)")
+	}
+}
+
+func TestExecutor_ResolveApproval_AlwaysAnswerSkipsFuturePrompts(t *testing.T) {
+	calls := 0
+	confirm := func(command string) (bool, bool) {
+		calls++
+		return true, true // operator picks "toujours" the one time they're asked
+	}
+	e := NewExecutor(nil, PolicyConfirm, confirm, "")
+
+	if approved := e.resolveApproval("shutdown -h now"); !approved || calls != 1 {
+		t.Fatalf("first resolveApproval: approved=%v calls=%d, want true/1", approved, calls)
+	}
+	// Second time around, the memorized decision must short-circuit
+	// before e.confirm is invoked again.
+	if approved := e.resolveApproval("shutdown -h now"); !approved || calls != 1 {
+		t.Errorf("second resolveApproval: approved=%v calls=%d, want true/1 (no re-prompt)", approved, calls)
+	}
+	// A different command was never approved, so it must still prompt.
+	if approved := e.resolveApproval("reboot"); !approved || calls != 2 {
+		t.Errorf("resolveApproval for a different command: approved=%v calls=%d, want true/2", approved, calls)
+	}
+}
+
+func TestExecutor_ResolveApproval_OnceAnswerDoesNotMemoize(t *testing.T) {
+	calls := 0
+	confirm := func(command string) (bool, bool) {
+		calls++
+		return true, false // operator approves just this once
+	}
+	e := NewExecutor(nil, PolicyConfirm, confirm, "")
+
+	e.resolveApproval("shutdown -h now")
+	e.resolveApproval("shutdown -h now")
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2 (a plain 'oui' must not be memorized)", calls)
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (func() bool {
 		for i := 0; i+len(substr) <= len(s); i++ {

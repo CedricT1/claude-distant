@@ -161,7 +161,7 @@ func splitArgv(command string) ([]string, error) {
 type Executor struct {
 	conn    *Conn
 	policy  Policy
-	confirm func(command string) bool
+	confirm func(command string) (approved bool, always bool)
 	// workDir is the client's dedicated scratch Workspace directory
 	// (workspace.go). Spawned commands default their working directory
 	// here so that anything they write without an absolute path lands
@@ -171,6 +171,12 @@ type Executor struct {
 	// default), which keeps this backward compatible for callers that
 	// don't have a workspace (e.g. existing tests).
 	workDir string
+
+	// alwaysMu guards alwaysAllowed, the set of exact command strings the
+	// operator approved with "toujours" at the confirm prompt. It is
+	// session-only (never persisted) and reset on client restart.
+	alwaysMu      sync.Mutex
+	alwaysAllowed map[string]bool
 }
 
 // NewExecutor builds an Executor. confirm is invoked only when policy is
@@ -178,8 +184,8 @@ type Executor struct {
 // until the local operator answers. workDir is the working directory
 // spawned commands run in (see the Executor.workDir field doc); pass "" to
 // fall back to the process's current directory.
-func NewExecutor(conn *Conn, policy Policy, confirm func(command string) bool, workDir string) *Executor {
-	return &Executor{conn: conn, policy: policy, confirm: confirm, workDir: workDir}
+func NewExecutor(conn *Conn, policy Policy, confirm func(command string) (approved bool, always bool), workDir string) *Executor {
+	return &Executor{conn: conn, policy: policy, confirm: confirm, workDir: workDir, alwaysAllowed: make(map[string]bool)}
 }
 
 // Handle dispatches a single `command` message to the right tool. It always
@@ -220,7 +226,7 @@ func (e *Executor) runShellOrCommand(ctx context.Context, cmd CommandMessage, us
 			e.sendResult(cmd.RequestID, 126, "refused_by_policy")
 			return
 		case PolicyConfirm:
-			approved := e.confirm != nil && e.confirm(p.Command)
+			approved := e.resolveApproval(p.Command)
 			e.sendApprovalResponse(cmd.RequestID, approved)
 			if !approved {
 				e.sendResult(cmd.RequestID, 126, "refused_by_user")
@@ -378,4 +384,35 @@ func (e *Executor) sendResult(requestID string, exitCode int, errMsg string) {
 
 func (e *Executor) sendApprovalResponse(requestID string, approved bool) {
 	_ = e.conn.WriteJSON(NewApprovalResponseMessage(requestID, approved))
+}
+
+// resolveApproval decides whether a destructive command may run under
+// PolicyConfirm. A command already approved with "toujours" earlier in the
+// session is approved without re-prompting; otherwise it blocks on
+// e.confirm and remembers the decision when the operator answers
+// "toujours" (approved && always).
+func (e *Executor) resolveApproval(command string) bool {
+	if e.isAlwaysAllowed(command) {
+		return true
+	}
+	if e.confirm == nil {
+		return false
+	}
+	approved, always := e.confirm(command)
+	if approved && always {
+		e.rememberAlwaysAllowed(command)
+	}
+	return approved
+}
+
+func (e *Executor) isAlwaysAllowed(command string) bool {
+	e.alwaysMu.Lock()
+	defer e.alwaysMu.Unlock()
+	return e.alwaysAllowed[command]
+}
+
+func (e *Executor) rememberAlwaysAllowed(command string) {
+	e.alwaysMu.Lock()
+	defer e.alwaysMu.Unlock()
+	e.alwaysAllowed[command] = true
 }

@@ -44,7 +44,11 @@ Client → result  {request_id:"r1", exit_code:0, error:null}
 Le client est lancé avec une politique `--policy auto|confirm|deny` :
 - `auto` : exécute sans confirmation.
 - `confirm` : pour les commandes classées destructives, affiche localement
-  « Le harnais veut exécuter : `X` [Autoriser/Refuser] ». Sans approbation → refus.
+  « Le harnais veut exécuter : `X` [Autoriser/Refuser/Toujours] (o/N/t) ».
+  Sans approbation → refus. Répondre « toujours » (`t`) approuve la commande
+  et mémorise cette commande exacte pour le reste de la session : elle ne
+  redéclenchera plus de prompt tant que le client tourne (mémorisation en
+  mémoire uniquement, perdue à chaque redémarrage du client).
 - `deny` : refuse les commandes destructives.
 En mode `confirm`, le client attend la décision de l'utilisateur avant d'exécuter,
 puis répond via `result` (avec `error:"refused_by_user"` si refusé).
