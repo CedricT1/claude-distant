@@ -31,13 +31,13 @@ const (
 // config holds the fully-resolved client configuration, whatever the source
 // (flag or environment variable) of each value. token is a *SecretBytes
 // (not a plain string) so it can be zeroized in memory at shutdown — part
-// of the "sans trace" runtime (docs/PLAN.md Phase 6).
+// of the residue-free runtime (docs/PLAN.md Phase 6).
 type config struct {
 	url          string
 	token        *SecretBytes
 	policy       Policy
 	insecure     bool
-	selfDestruct bool
+	removeOnExit bool
 }
 
 func main() {
@@ -70,8 +70,8 @@ func main() {
 	RunGuarded(func() {
 		ws.Cleanup()
 		cfg.token.Zero()
-		if cfg.selfDestruct {
-			selfDestructSelf()
+		if cfg.removeOnExit {
+			removeOwnBinary()
 		}
 	}, func() {
 		runErr = runForever(ctx, cfg, ws)
@@ -84,21 +84,21 @@ func main() {
 	fmt.Println("Arrêt propre du client.")
 }
 
-// selfDestructSelf resolves the running binary's own path and best-effort
-// deletes it (see selfdestruct.go). Failures are reported but never fatal:
-// self-destruct is a best-effort convenience, not a security boundary, and
-// must never prevent an otherwise-clean shutdown.
-func selfDestructSelf() {
+// removeOwnBinary resolves the running binary's own path and best-effort
+// deletes it (see cleanup_binary.go). Failures are reported but never
+// fatal: removing the binary is a best-effort cleanup convenience, not a
+// security boundary, and must never prevent an otherwise-clean shutdown.
+func removeOwnBinary() {
 	path, err := resolveExecutablePath(os.Executable)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "claude-distant-client: self-destruct: chemin introuvable:", err)
+		fmt.Fprintln(os.Stderr, "claude-distant-client: remove-on-exit: chemin introuvable:", err)
 		return
 	}
-	if err := selfDestruct(runtime.GOOS, path, os.Getpid()); err != nil {
-		fmt.Fprintln(os.Stderr, "claude-distant-client: self-destruct: suppression échouée:", err)
+	if err := removeBinary(runtime.GOOS, path, os.Getpid()); err != nil {
+		fmt.Fprintln(os.Stderr, "claude-distant-client: remove-on-exit: suppression échouée:", err)
 		return
 	}
-	fmt.Println("Self-destruct: binaire supprimé.")
+	fmt.Println("Nettoyage: binaire supprimé.")
 }
 
 // parseConfig resolves flags and environment variables into a config, with
@@ -113,7 +113,7 @@ func parseConfig(args []string, getenv func(string) string) (config, error) {
 	tokenFlag := fs.String("token", "", "Jeton Bearer pré-configuré du client")
 	policyFlag := fs.String("policy", "", "Politique de garde-fou : auto|confirm|deny")
 	insecureFlag := fs.Bool("insecure-skip-verify", false, "Désactive la vérification TLS (développement uniquement)")
-	selfDestructFlag := fs.Bool("self-destruct", false, "Supprime le binaire lui-même à l'arrêt propre (best-effort, désactivé par défaut)")
+	removeOnExitFlag := fs.Bool("remove-on-exit", false, "Supprime le binaire lui-même à l'arrêt propre (best-effort, désactivé par défaut)")
 
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
@@ -152,7 +152,7 @@ func parseConfig(args []string, getenv func(string) string) (config, error) {
 		token:        NewSecret(token),
 		policy:       policy,
 		insecure:     *insecureFlag,
-		selfDestruct: selfDestructEnabled(*selfDestructFlag, getenv),
+		removeOnExit: removeOnExitEnabled(*removeOnExitFlag, getenv),
 	}, nil
 }
 

@@ -4,7 +4,7 @@ package main
 // token) as a mutable byte slice instead of an immutable Go string, so it
 // can be explicitly overwritten ("zeroized") once no longer needed instead
 // of relying on the garbage collector to eventually reclaim — and never
-// scrub — the original plaintext. Part of the "sans trace" runtime
+// scrub — the original plaintext. Part of the residue-free runtime
 // (docs/PLAN.md Phase 6): best-effort erasure of secrets in memory at
 // shutdown.
 type SecretBytes struct {

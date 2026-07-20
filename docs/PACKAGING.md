@@ -1,14 +1,14 @@
-# Packaging — client portable « sans trace » (Phase 6)
+# Packaging — client portable « sans résidu » (Phase 6)
 
 Ce document couvre la **Phase 6** de [`docs/PLAN.md`](PLAN.md) : livrer le
 client PC distant (`client/`) sous forme de **binaire unique portable**
-Windows/Linux qui ne laisse **aucune trace** sur la machine une fois fermé
+Windows/Linux qui ne laisse **aucun résidu** sur la machine une fois fermé
 — pas de service, pas de clé de registre/autostart, pas de fichier
 résiduel. Voir aussi [`docs/PROTOCOL.md`](PROTOCOL.md) pour le protocole et
 `client/README.md` pour la référence complète des flags/variables
 d'environnement.
 
-## 1. Modèle « sans trace »
+## 1. Modèle « sans résidu »
 
 Le client n'installe rien et ne persiste rien par défaut :
 
@@ -30,7 +30,7 @@ Le client n'installe rien et ne persiste rien par défaut :
 - **Nettoyage garanti à la sortie — y compris sur panic.** `main()`
   encapsule toute l'exécution dans `RunGuarded(cleanup, run)`
   (`client/lifecycle.go`) : `cleanup` (suppression du workspace,
-  effacement du token en mémoire, self-destruct optionnel) s'exécute
+  effacement du token en mémoire, suppression optionnelle du binaire) s'exécute
   **exactement une fois**, que `run` retourne normalement, retourne une
   erreur, ou **panique** — le panic est re-levé après coup pour ne jamais
   masquer un vrai bug. Le même chemin de sortie est emprunté sur Ctrl-C/
@@ -44,8 +44,8 @@ Le client n'installe rien et ne persiste rien par défaut :
   (utilisé une seule fois, juste avant `DialRelay`), ni empêcher toute copie
   que le runtime Go aurait pu faire de son côté — mais le buffer principal
   ne contient plus le secret en clair après `Zero()`.
-- **`--self-destruct` (optionnel, désactivé par défaut).** À la sortie, si
-  activé (`--self-destruct` ou `CLAUDE_DISTANT_SELF_DESTRUCT=true`), le
+- **`--remove-on-exit` (optionnel, désactivé par défaut).** À la sortie, si
+  activé (`--remove-on-exit` ou `CLAUDE_DISTANT_REMOVE_ON_EXIT=true`), le
   client supprime aussi son propre binaire, en best-effort :
   - **Linux/macOS** : `os.Remove(cheminExe)` direct. Sous Unix, supprimer
     l'entrée de répertoire d'un fichier encore ouvert par le processus qui
@@ -56,11 +56,11 @@ Le client n'installe rien et ne persiste rien par défaut :
     écrit un petit script `.cmd` détaché dans un dossier temporaire, qui
     attend (poll `tasklist`) la fin du PID du client, supprime l'exe, puis
     se supprime lui-même (`del "%~f0"`) — voir
-    `buildWindowsSelfDeleteScript`/`selfDestructWindows` dans
-    `client/selfdestruct.go`.
+    `buildWindowsCleanupScript`/`removeBinaryWindows` dans
+    `client/cleanup_binary.go`.
   - Le résultat (succès ou échec) est journalisé sur la console — jamais
-    fatal : un échec du self-destruct ne doit jamais empêcher un arrêt
-    propre par ailleurs.
+    fatal : un échec de la suppression du binaire ne doit jamais empêcher un
+    arrêt propre par ailleurs.
 
 Ce qui reste **hors du contrôle du client**, par nature, et n'est donc pas
 « nettoyé » — à documenter côté utilisateur final (§4) :
@@ -227,13 +227,13 @@ Pour chaque binaire produit par `make dist` :
 6. **Fermer** le client (Ctrl-C dans le terminal, ou fermer la fenêtre) dès
    la session terminée : la connexion se ferme proprement, le dossier de
    travail temporaire est supprimé intégralement, et le jeton est effacé de
-   la mémoire du processus. **Plus de trace** sur la machine — sauf si
-   `--self-destruct` était actif, auquel cas le binaire lui-même est aussi
+   la mémoire du processus. **Plus aucun résidu** sur la machine — sauf si
+   `--remove-on-exit` était actif, auquel cas le binaire lui-même est aussi
    supprimé (best-effort ; sous Windows, la suppression effective peut
-   prendre quelques secondes après la fermeture, le temps que le script
-   d'auto-suppression détecte la fin du processus).
+   prendre quelques secondes après la fermeture, le temps que le script de
+   nettoyage détecte la fin du processus).
 
-`--self-destruct` reste **optionnel et désactivé par défaut** : à activer
+`--remove-on-exit` reste **optionnel et désactivé par défaut** : à activer
 uniquement si l'utilisateur souhaite explicitement qu'aucune copie du
 binaire ne survive sur la machine après usage (par exemple un poste
 partagé/public). Dans le cas courant où la même machine sera réutilisée

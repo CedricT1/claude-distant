@@ -10,7 +10,7 @@ import (
 // the client needs to write to disk (temporary scripts, intermediate
 // files for command execution, etc.) must live under here so that a single
 // Cleanup() call at shutdown — normal exit, signal, or panic — leaves the
-// target machine exactly as it found it ("sans trace", docs/PLAN.md
+// target machine exactly as it found it (residue-free runtime, docs/PLAN.md
 // Phase 6).
 type Workspace struct {
 	dir string
@@ -26,7 +26,7 @@ func NewWorkspace() (*Workspace, error) {
 	}
 	// Best-effort: some filesystems/platforms (e.g. Windows/FAT) don't
 	// honor Unix permission bits, and that's fine — this is defense in
-	// depth, not the primary "sans trace" guarantee (Cleanup is).
+	// depth, not the primary residue-free guarantee (Cleanup is).
 	_ = os.Chmod(dir, 0o700)
 	return &Workspace{dir: dir}, nil
 }

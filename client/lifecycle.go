@@ -2,7 +2,7 @@ package main
 
 // RunGuarded executes fn, guaranteeing that cleanup runs exactly once
 // afterward — whether fn returns normally or panics. This is what backs
-// the "sans trace" guarantee (docs/PLAN.md Phase 6): the scratch
+// the residue-free guarantee (docs/PLAN.md Phase 6): the scratch
 // Workspace (workspace.go) must be removed even if something inside fn
 // panics, not just on the happy path or a clean signal-triggered exit.
 //

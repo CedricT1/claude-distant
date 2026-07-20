@@ -130,7 +130,7 @@ func TestBuildShellArgv_PosixUsesDashC(t *testing.T) {
 	}
 }
 
-// Red-first tests for the "sans trace" workspace wiring: spawned commands
+// Red-first tests for the residue-free workspace wiring: spawned commands
 // must default their working directory to the Executor's workDir (the
 // client's scratch Workspace, workspace.go) so anything they write without
 // an absolute path is removed automatically at shutdown.

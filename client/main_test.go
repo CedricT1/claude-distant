@@ -105,36 +105,36 @@ func TestParseConfig_InsecureFlagCanBeSet(t *testing.T) {
 	}
 }
 
-func TestParseConfig_SelfDestructDefaultsFalse(t *testing.T) {
+func TestParseConfig_RemoveOnExitDefaultsFalse(t *testing.T) {
 	cfg, err := parseConfig([]string{"-url=wss://x/ws/client", "-token=t"}, noEnv)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.selfDestruct {
-		t.Error("selfDestruct = true, want false by default")
+	if cfg.removeOnExit {
+		t.Error("removeOnExit = true, want false by default")
 	}
 }
 
-func TestParseConfig_SelfDestructFlagEnables(t *testing.T) {
-	cfg, err := parseConfig([]string{"-url=wss://x/ws/client", "-token=t", "-self-destruct"}, noEnv)
+func TestParseConfig_RemoveOnExitFlagEnables(t *testing.T) {
+	cfg, err := parseConfig([]string{"-url=wss://x/ws/client", "-token=t", "-remove-on-exit"}, noEnv)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !cfg.selfDestruct {
-		t.Error("selfDestruct = false, want true when --self-destruct is set")
+	if !cfg.removeOnExit {
+		t.Error("removeOnExit = false, want true when --remove-on-exit is set")
 	}
 }
 
-func TestParseConfig_SelfDestructEnvEnables(t *testing.T) {
+func TestParseConfig_RemoveOnExitEnvEnables(t *testing.T) {
 	cfg, err := parseConfig(
 		[]string{"-url=wss://x/ws/client", "-token=t"},
-		envMap(map[string]string{"CLAUDE_DISTANT_SELF_DESTRUCT": "true"}),
+		envMap(map[string]string{"CLAUDE_DISTANT_REMOVE_ON_EXIT": "true"}),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !cfg.selfDestruct {
-		t.Error("selfDestruct = false, want true when CLAUDE_DISTANT_SELF_DESTRUCT=true")
+	if !cfg.removeOnExit {
+		t.Error("removeOnExit = false, want true when CLAUDE_DISTANT_REMOVE_ON_EXIT=true")
 	}
 }
 

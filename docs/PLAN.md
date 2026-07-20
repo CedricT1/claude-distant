@@ -2,7 +2,7 @@
 
 Accès distant piloté par un harnais IA (type TeamViewer/AnyDesk, mais l'opérateur
 est Claude) pour faire de l'administration système sur un PC Windows ou Ubuntu,
-**sans installation** et **sans trace** sur la machine distante.
+**sans installation** et **sans résidu** sur la machine distante.
 
 ## 1. Architecture
 
@@ -19,7 +19,7 @@ est Claude) pour faire de l'administration système sur un PC Windows ou Ubuntu,
 
 ### Invariants
 - Le PC distant n'ouvre **aucun port entrant** : connexion **sortante** WebSocket/TLS.
-- Client **portable, sans installation, sans trace** : binaire unique lancé depuis un
+- Client **portable, sans installation, sans résidu** : binaire unique lancé depuis un
   dossier temporaire, auto-nettoyage à la fermeture (pas de service, clé registre, autostart).
 - Le harnais ne parle jamais au PC directement : il passe par le relay via **MCP
   authentifié**, en ciblant un **numéro de session** éphémère (9 chiffres).
@@ -32,7 +32,7 @@ est Claude) pour faire de l'administration système sur un PC Windows ou Ubuntu,
 |---|---|---|
 | Relay / broker | Python 3.12 + FastAPI + `websockets` | même langage que l'écosystème existant |
 | Serveur MCP | MCP Python SDK (Streamable HTTP) | auth Bearer/OAuth natif |
-| Client PC distant | **Go** (binaire statique unique) | portable, sans runtime, sans trace |
+| Client PC distant | **Go** (binaire statique unique) | portable, sans runtime, sans résidu |
 | Transport client↔relay | WebSocket over TLS (wss) | sortant, firewall/NAT-friendly |
 | Session store | Redis | TTL des codes, rate-limit, multi-instance |
 | Déploiement | Docker + docker-compose | |
@@ -85,7 +85,7 @@ est Claude) pour faire de l'administration système sur un PC Windows ou Ubuntu,
 - **Confirmation locale configurable** (`auto`/`confirm`/`deny`) pour les commandes destructives.
 - Journal d'audit immuable, allowlist/denylist, quotas, kill-switch de session, TLS strict.
 
-### Phase 6 — Client portable « sans trace »
+### Phase 6 — Client portable « sans résidu »
 - Build Go binaire unique Win/Linux, exécution en temp, auto-nettoyage, signature (option).
 
 ### Phase 7 — Tests, observabilité, doc

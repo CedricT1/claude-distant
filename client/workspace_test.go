@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// Red-first tests for the "sans trace" scratch workspace (workspace.go
+// Red-first tests for the residue-free scratch workspace (workspace.go
 // does not exist yet): a dedicated temp directory created at startup and
 // fully removed at Cleanup(), including when cleanup is triggered by a
 // cancelled context (the same path a SIGINT/SIGTERM signal takes via

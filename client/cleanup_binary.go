@@ -9,15 +9,15 @@ import (
 	"strings"
 )
 
-// selfDestructEnabled resolves the --self-destruct flag / the
-// CLAUDE_DISTANT_SELF_DESTRUCT env var into a single boolean decision.
+// removeOnExitEnabled resolves the --remove-on-exit flag / the
+// CLAUDE_DISTANT_REMOVE_ON_EXIT env var into a single boolean decision.
 // Disabled by default: the flag (or a truthy env value) must explicitly
 // opt in, since deleting the running binary is irreversible.
-func selfDestructEnabled(flagSet bool, getenv func(string) string) bool {
+func removeOnExitEnabled(flagSet bool, getenv func(string) string) bool {
 	if flagSet {
 		return true
 	}
-	return isTruthy(getenv("CLAUDE_DISTANT_SELF_DESTRUCT"))
+	return isTruthy(getenv("CLAUDE_DISTANT_REMOVE_ON_EXIT"))
 }
 
 func isTruthy(v string) bool {
@@ -34,7 +34,7 @@ func isTruthy(v string) bool {
 // unit-testable without depending on the real running process. Symlinks
 // are resolved on a best-effort basis; if that fails, the unresolved path
 // from executable() is still returned rather than erroring out, since a
-// self-destruct attempt with a slightly-off path is still worth trying.
+// removal attempt with a slightly-off path is still worth trying.
 func resolveExecutablePath(executable func() (string, error)) (string, error) {
 	p, err := executable()
 	if err != nil {
@@ -46,30 +46,31 @@ func resolveExecutablePath(executable func() (string, error)) (string, error) {
 	return p, nil
 }
 
-// selfDestruct best-effort deletes the running binary at exePath.
+// removeBinary best-effort deletes the running binary at exePath so no copy
+// is left behind on the machine after use (opt-in cleanup, see
+// docs/PACKAGING.md).
 //
 // On Linux/macOS this is a direct unlink: removing a file's directory
 // entry while a process still has it open (as the running client does)
-// succeeds immediately and is exactly what "self-destruct" needs — no
-// helper process required.
+// succeeds immediately — no helper process required.
 //
 // On Windows, an executable that is currently running cannot delete its
 // own file (the OS keeps it locked). The documented workaround is to spawn
 // a small detached helper (.cmd script) that waits for our PID to exit and
 // only then deletes the exe — and finally deletes itself, so it doesn't
-// become the trace it was meant to avoid leaving behind.
-func selfDestruct(goos, exePath string, pid int) error {
+// leave a residual file behind either.
+func removeBinary(goos, exePath string, pid int) error {
 	if goos == "windows" {
-		return selfDestructWindows(exePath, pid)
+		return removeBinaryWindows(exePath, pid)
 	}
 	return os.Remove(exePath)
 }
 
-// buildWindowsSelfDeleteScript returns the contents of a .cmd script that
+// buildWindowsCleanupScript returns the contents of a .cmd script that
 // polls for pid to disappear from `tasklist`, deletes exePath, then
 // deletes itself (`%~f0` is the script's own full path in a Windows batch
 // file).
-func buildWindowsSelfDeleteScript(exePath string, pid int) string {
+func buildWindowsCleanupScript(exePath string, pid int) string {
 	pidStr := strconv.Itoa(pid)
 	var b strings.Builder
 	b.WriteString("@echo off\r\n")
@@ -84,21 +85,21 @@ func buildWindowsSelfDeleteScript(exePath string, pid int) string {
 	return b.String()
 }
 
-// selfDestructWindows writes the helper script to a temp file and launches
+// removeBinaryWindows writes the helper script to a temp file and launches
 // it fully detached (not waited on) so it can outlive this process, then
 // returns immediately; the actual deletion happens after this process
 // exits.
-func selfDestructWindows(exePath string, pid int) error {
-	script := buildWindowsSelfDeleteScript(exePath, pid)
+func removeBinaryWindows(exePath string, pid int) error {
+	script := buildWindowsCleanupScript(exePath, pid)
 	scriptPath := filepath.Join(os.TempDir(), fmt.Sprintf("claude-distant-cleanup-%d.cmd", pid))
 	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
-		return fmt.Errorf("écriture du script d'auto-suppression: %w", err)
+		return fmt.Errorf("écriture du script de nettoyage: %w", err)
 	}
 	// "start /min" launches the script as its own detached window/process
 	// so it keeps running after this process (and this cmd /C) exits.
 	cmd := exec.Command("cmd", "/C", "start", "/min", "", scriptPath)
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("lancement du script d'auto-suppression: %w", err)
+		return fmt.Errorf("lancement du script de nettoyage: %w", err)
 	}
 	return nil
 }

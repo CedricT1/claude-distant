@@ -1,6 +1,6 @@
 # claude-distant
 
-Accès distant piloté par un harnais IA (Claude) pour l'administration système sur un PC Windows ou Ubuntu, **sans installation** et **sans trace** sur la machine distante.
+Accès distant piloté par un harnais IA (Claude) pour l'administration système sur un PC Windows ou Ubuntu, **sans installation** et **sans résidu** sur la machine distante.
 
 ## À quoi ça sert ?
 
@@ -8,7 +8,7 @@ Accès distant piloté par un harnais IA (Claude) pour l'administration système
 
 **Invariants de sécurité** :
 - Le PC distant n'ouvre **aucun port entrant** : seule connexion **sortante** WebSocket/TLS vers le relay
-- Client **portable, sans installation, sans trace** : binaire unique lancé depuis un dossier temporaire, auto-nettoyage à la fermeture
+- Client **portable, sans installation, sans résidu** : binaire unique lancé depuis un dossier temporaire, auto-nettoyage à la fermeture
 - Sessions **éphémères** : codes 9 chiffres à durée de vie courte (30 min par défaut)
 - **Consentement explicite** : l'utilisateur voit le code et approuve les commandes sensibles selon la politique locale
 
@@ -38,7 +38,7 @@ Accès distant piloté par un harnais IA (Claude) pour l'administration système
 4. **Connexion du harness** : Claude utilise l'outil MCP `connect_session(code)` pour s'authentifier auprès du relay
 5. **Exécution de commandes** : Claude exécute des tâches via les outils MCP (`system_info`, `run_shell`, etc.) ; le relay les route au client
 6. **Garde-fou local** : pour les commandes destructives, le client demande confirmation localement selon la politique (`auto` / `confirm` / `deny`)
-7. **Fermeture** : le code expire ou le client s'arrête ; session clôturée, aucune trace sur le PC
+7. **Fermeture** : le code expire ou le client s'arrête ; session clôturée, aucun résidu sur le PC
 
 ## Structure du dépôt
 
@@ -61,7 +61,7 @@ claude-distant/
 │   ├── PLAN.md              # Plan de développement et phases
 │   ├── PROTOCOL.md          # Spécification des protocoles client↔relay et harness↔relay
 │   ├── SECURITY.md          # Modèle de menace, TLS externe, scopes, audit
-│   └── PACKAGING.md         # Build, signature, modèle « sans trace »
+│   └── PACKAGING.md         # Build, signature, modèle « sans résidu »
 ├── tests/                   # Tests (relay pytest ; client Go côté client/)
 └── README.md               # Ce fichier
 ```
@@ -106,9 +106,9 @@ make checksums                        # SHA256SUMS
 ./claude-distant --url wss://relay.example.com --token <CLIENT_TOKEN>
 ```
 
-Flags utiles : `--policy auto|confirm|deny` (garde-fou local), `--self-destruct`
+Flags utiles : `--policy auto|confirm|deny` (garde-fou local), `--remove-on-exit`
 (supprime le binaire à l'arrêt propre). Équivalents en variables d'environnement :
-`CLAUDE_DISTANT_URL`, `CLAUDE_DISTANT_TOKEN`, `CLAUDE_DISTANT_POLICY`, `CLAUDE_DISTANT_SELF_DESTRUCT`.
+`CLAUDE_DISTANT_URL`, `CLAUDE_DISTANT_TOKEN`, `CLAUDE_DISTANT_POLICY`, `CLAUDE_DISTANT_REMOVE_ON_EXIT`.
 
 Le client affiche un code unique à 9 chiffres.
 
@@ -129,7 +129,7 @@ run_shell(command="df -h", shell="auto")
 |-----------|------------|-------|
 | Relay / Broker | Python 3.12 + FastAPI + websockets | Même écosystème que le harness |
 | Serveur MCP | MCP Python SDK (Streamable HTTP) | Auth Bearer native |
-| Client PC | **Go** (binaire statique unique) | Portable, sans dépendances runtime, sans trace |
+| Client PC | **Go** (binaire statique unique) | Portable, sans dépendances runtime, sans résidu |
 | Transport client↔relay | WebSocket over TLS (`wss://`) | Sortant, firewall/NAT-friendly |
 | Session store | Redis (optionnel) | Pour multi-instance ; in-memory par défaut (single-instance) |
 | Déploiement | Docker + docker-compose | Reproducibilité et isolation |
@@ -197,7 +197,7 @@ Voir [docs/SECURITY.md](docs/SECURITY.md) pour le modèle de menace complet et l
 4. **Phase 3** (✓) : Serveur MCP sur le relay
 5. **Phase 4** (✓ primitives) : Exécution cross-platform via `run_shell`/`run_command` (helpers sysadmin dédiés à venir)
 6. **Phase 5** (✓) : Durcissement sécurité (OAuth 2.1 scopé, audit immuable, kill-switch, tokens par-session)
-7. **Phase 6** (✓) : Client portable sans trace (workspace temp auto-nettoyé, `--self-destruct`, build strippé)
+7. **Phase 6** (✓) : Client portable sans résidu (workspace temp auto-nettoyé, `--remove-on-exit`, build strippé)
 8. **Phase 7** (en cours) : Tests (relay 151 + client 61 verts), observabilité, test d'intégration bout-en-bout relay↔client
 
 Voir [docs/PLAN.md](docs/PLAN.md) pour les détails.

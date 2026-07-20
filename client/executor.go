@@ -166,7 +166,7 @@ type Executor struct {
 	// (workspace.go). Spawned commands default their working directory
 	// here so that anything they write without an absolute path lands
 	// inside the workspace and is removed automatically at Cleanup() —
-	// part of the "sans trace" guarantee (docs/PLAN.md Phase 6). Empty
+	// part of the residue-free guarantee (docs/PLAN.md Phase 6). Empty
 	// means "use the process's own current directory" (exec.Cmd's normal
 	// default), which keeps this backward compatible for callers that
 	// don't have a workspace (e.g. existing tests).

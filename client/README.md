@@ -60,10 +60,10 @@ machine cible, sans installation, service, clé de registre ni autostart.
 | `--token` | `CLAUDE_DISTANT_TOKEN` | — (requis) | Jeton Bearer pré-configuré |
 | `--policy` | `CLAUDE_DISTANT_POLICY` | `confirm` | Garde-fou : `auto` \| `confirm` \| `deny` |
 | `--insecure-skip-verify` | — | `false` | Désactive la vérification TLS (dev uniquement, jamais en production) |
-| `--self-destruct` | `CLAUDE_DISTANT_SELF_DESTRUCT` | `false` | À l'arrêt propre, supprime aussi le binaire lui-même (best-effort). Voir `docs/PACKAGING.md` §1 |
+| `--remove-on-exit` | `CLAUDE_DISTANT_REMOVE_ON_EXIT` | `false` | À l'arrêt propre, supprime aussi le binaire lui-même (best-effort). Voir `docs/PACKAGING.md` §1 |
 
 Un flag l'emporte toujours sur la variable d'environnement correspondante.
-`CLAUDE_DISTANT_SELF_DESTRUCT` accepte `1`/`true`/`yes`/`on` (insensible à la casse) comme valeurs activantes.
+`CLAUDE_DISTANT_REMOVE_ON_EXIT` accepte `1`/`true`/`yes`/`on` (insensible à la casse) comme valeurs activantes.
 
 Au démarrage, le client :
 1. se connecte au relay et envoie `register` (OS détecté, hostname, version) ;
@@ -127,17 +127,17 @@ Windows), et `result` est renvoyé avec `error:"timeout"`.
 | `proc_linux.go`, `proc_windows.go` | démarrage/arrêt de l'arbre de processus par OS |
 | `policy.go` | garde-fou local (classification destructive + invite `confirm`) |
 | `protocol.go` | types Go des messages du protocole |
-| `workspace.go` | répertoire de travail temporaire dédié (`NewWorkspace`/`Cleanup`), « sans trace » |
+| `workspace.go` | répertoire de travail temporaire dédié (`NewWorkspace`/`Cleanup`), « sans résidu » |
 | `lifecycle.go` | `RunGuarded` : garantit le nettoyage à la sortie, y compris sur panic |
 | `secrets.go` | `SecretBytes` : effacement best-effort des secrets (token) en mémoire |
-| `selfdestruct.go` | `--self-destruct` : suppression best-effort du binaire lui-même à l'arrêt |
-| `*_test.go` | tests unitaires (sérialisation protocole, sélection de shell, classification destructive, parsing des flags, workspace/self-destruct/secrets) |
+| `cleanup_binary.go` | `--remove-on-exit` : suppression best-effort du binaire lui-même à l'arrêt |
+| `*_test.go` | tests unitaires (sérialisation protocole, sélection de shell, classification destructive, parsing des flags, workspace/remove-on-exit/secrets) |
 
-## Sans trace
+## Sans résidu
 
 Le client ne s'installe pas : pas de service, pas de clé de registre, pas
 d'autostart. Voir `docs/PACKAGING.md` pour le détail complet du modèle
-« sans trace » et le build portable ; en résumé :
+« sans résidu » et le build portable ; en résumé :
 
 - **Aucun log sur disque par défaut** : toute la sortie va sur la console
   (stdout/stderr) uniquement.
@@ -148,9 +148,9 @@ d'autostart. Voir `docs/PACKAGING.md` pour le détail complet du modèle
 - **Secrets effacés en mémoire** (`secrets.go:SecretBytes.Zero()`) : le
   jeton Bearer n'est jamais stocké en `string` Go immuable, et est écrasé
   par des zéros à la sortie.
-- **`--self-destruct` (désactivé par défaut)** : supprime aussi le binaire
+- **`--remove-on-exit` (désactivé par défaut)** : supprime aussi le binaire
   lui-même à l'arrêt (best-effort ; direct sous Linux, via un script
-  détaché sous Windows — voir `selfdestruct.go` et `docs/PACKAGING.md` §1).
+  détaché sous Windows — voir `cleanup_binary.go` et `docs/PACKAGING.md` §1).
 
 Un arrêt (Ctrl-C ou signal) ferme proprement la connexion WebSocket (frame
 de fermeture) avant de quitter.
