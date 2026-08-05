@@ -110,6 +110,29 @@ dans `policy.go`.
   totale/disponible (Mo). Implémenté sans dépendance lourde : `/proc/uptime`
   et `/proc/meminfo` sur Linux, `GetTickCount64`/`GlobalMemoryStatusEx` de
   `kernel32.dll` via `syscall` sur Windows.
+- **`read_file`/`write_file`** (`filetransfer.go`) — transfert de fichiers,
+  réservé aux relays qui les dispatchent (le client annonce la capacité
+  `file_transfer` à son `register`) :
+  - plafond de **8 Mio** par transfert, dans les deux sens ;
+  - `read_file` découpe le fichier en tranches de 192 Kio brutes (≈256 Kio en
+    base64) envoyées en plusieurs messages `file_chunk` numérotés par `seq`,
+    et supporte `offset`/`max_bytes` (troncature signalée par `truncated`) ;
+  - `write_file` installe le contenu de façon **atomique** : fichier
+    temporaire dans le même répertoire que la cible, puis `rename` — un échec
+    à n'importe quelle étape laisse la cible préexistante intacte et ne laisse
+    aucun temporaire derrière lui ; un chemin final qui est un lien symbolique
+    est **remplacé** par un fichier régulier (conséquence du `rename`), pas
+    suivi ;
+  - erreurs stables portées par `result.error` (`file_not_found`,
+    `permission_denied`, `is_a_directory`, `file_exists`, `file_too_large`,
+    `invalid_base64`, `invalid_params`, `io_error`), classifiées via
+    `errors.Is` sur les sentinelles `fs.Err*` plutôt que par correspondance de
+    texte (dépendante de l'OS/la locale) ;
+  - comme `run_shell`/`run_command`, systématiquement soumis au garde-fou
+    local : en `confirm`, chaque lecture ou écriture déclenche une invite
+    (`read_file <chemin>` / `write_file <chemin> (<n> octets)`), sans passer
+    par la classification « destructif » ; en `deny`, toujours refusés. Voir
+    `docs/PROTOCOL.md` §4 pour le détail protocolaire complet.
 
 Les deux outils `run_shell`/`run_command` respectent `params.timeout`
 (secondes) : au dépassement, le process (et son arbre de sous-processus) est
@@ -123,6 +146,7 @@ Windows), et `result` est renvoyé avec `error:"timeout"`.
 | `main.go` | flags/env (`parseConfig`), boucle de connexion/reconnexion, affichage du code de session, orchestration de l'arrêt propre |
 | `wsconn.go` | connexion WebSocket (dial, JSON I/O thread-safe, deadlines) |
 | `executor.go` | exécution `run_shell`/`run_command` (sélection d'interpréteur, streaming, timeout, répertoire de travail = workspace) |
+| `filetransfer.go` | exécution `read_file`/`write_file` (chunking en lecture, écriture atomique, codes d'erreur stables) |
 | `sysinfo.go` (+ `sysinfo_linux.go`, `sysinfo_windows.go`) | `system_info` cross-plateforme |
 | `proc_linux.go`, `proc_windows.go` | démarrage/arrêt de l'arbre de processus par OS |
 | `policy.go` | garde-fou local (classification destructive + invite `confirm`) |

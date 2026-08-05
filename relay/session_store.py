@@ -12,7 +12,7 @@ import asyncio
 import secrets
 import time
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 CODE_LENGTH = 9
 CODE_UPPER_BOUND = 10**CODE_LENGTH
@@ -22,6 +22,18 @@ MAX_CREATE_ATTEMPTS = 100
 def generate_session_code() -> str:
     """Génère un code de session à 9 chiffres (zéro-paddé), cryptographiquement aléatoire."""
     return f"{secrets.randbelow(CODE_UPPER_BOUND):0{CODE_LENGTH}d}"
+
+
+def normalize_capabilities(capabilities: Sequence[str] | None) -> tuple[str, ...]:
+    """Normalise une liste de capacités déclarées en tuple immuable.
+
+    `None` (ancien client, qui n'envoie pas le champ) devient `()` : l'absence
+    de capacité est la valeur sûre, celle qui interdit tout dispatch d'outil
+    « nouvelle génération » vers ce client (cf. `mcp_server._require_capability`).
+    """
+    if not capabilities:
+        return ()
+    return tuple(capabilities)
 
 
 @dataclass
@@ -35,6 +47,11 @@ class SessionRecord:
     version: str
     created_at: float
     expires_at: float
+    # Capacités optionnelles déclarées par le client à `register` (ex.
+    # `("file_transfer",)`). Ajouté **en dernier**, avec un défaut, pour ne
+    # casser aucune construction positionnelle existante : un client déjà
+    # déployé n'annonce rien et reste donc à `()`.
+    capabilities: tuple[str, ...] = ()
 
 
 class SessionStore(abc.ABC):
@@ -52,8 +69,14 @@ class SessionStore(abc.ABC):
         hostname: str,
         version: str,
         ttl_seconds: float,
+        *,
+        capabilities: Sequence[str] | None = None,
     ) -> str:
-        """Enregistre une nouvelle connexion et retourne le code attribué (unique)."""
+        """Enregistre une nouvelle connexion et retourne le code attribué (unique).
+
+        `capabilities` est keyword-only et optionnel : les appelants historiques
+        (à cinq arguments) restent valides et obtiennent `()`.
+        """
 
     @abc.abstractmethod
     async def get(self, code: str) -> SessionRecord | None:
@@ -98,6 +121,8 @@ class InMemorySessionStore(SessionStore):
         hostname: str,
         version: str,
         ttl_seconds: float,
+        *,
+        capabilities: Sequence[str] | None = None,
     ) -> str:
         async with self._lock:
             code = None
@@ -117,6 +142,7 @@ class InMemorySessionStore(SessionStore):
                 version=version,
                 created_at=now,
                 expires_at=now + ttl_seconds,
+                capabilities=normalize_capabilities(capabilities),
             )
             return code
 

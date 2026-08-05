@@ -62,6 +62,21 @@ Le client n'installe rien et ne persiste rien par défaut :
     fatal : un échec de la suppression du binaire ne doit jamais empêcher un
     arrêt propre par ailleurs.
 
+**Nuance importante : les fichiers écrits sur la machine cible via `write_file`
+survivent au nettoyage du client.** Contrairement au workspace temporaire
+(§ ci-dessus), supprimé intégralement à l'arrêt, un fichier installé par
+`write_file` (`client/filetransfer.go:writeFileTransfer`) est écrit à
+l'emplacement demandé par le harnais — potentiellement hors du workspace — et
+n'est **pas** un résidu que le client nettoie : c'est précisément le but de
+l'outil (déposer un fichier de façon durable sur la cible). Un projet qui
+promet « sans résidu » doit le dire noir sur blanc : le modèle « sans résidu »
+couvre l'empreinte du *client lui-même* (binaire, workspace, secrets en
+mémoire), pas les effets délibérés des commandes/transferts que l'opérateur
+lui fait exécuter. Comme les autres outils, les opérations `read_file`/
+`write_file` respectent la politique de garde-fou locale (`--policy`, voir
+`docs/PROTOCOL.md` §1) : en `confirm`, elles déclenchent toujours une
+confirmation locale ; en `deny`, elles sont toujours refusées.
+
 Ce qui reste **hors du contrôle du client**, par nature, et n'est donc pas
 « nettoyé » — à documenter côté utilisateur final (§4) :
 - L'historique shell (le lancement de la commande peut apparaître dans

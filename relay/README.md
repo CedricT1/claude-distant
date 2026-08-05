@@ -54,10 +54,16 @@ pas d'ouverture accidentelle sans authentification.
   être remplacée par un store Redis (cf. `docs/PLAN.md` §2) sans changer les
   appelants.
 - `auth.py` — extraction/validation des jetons Bearer (client et MCP).
-- `mcp_server.py` — les 4 outils MCP (`connect_session`, `system_info`,
-  `run_command`, `run_shell`) construits avec le SDK MCP officiel
-  (`mcp.server.fastmcp.FastMCP`), transport Streamable HTTP. Voir les TODO en
-  tête de fichier concernant la migration OAuth 2.1 (phase 5 du plan).
+- `mcp_server.py` — les outils MCP construits avec le SDK MCP officiel
+  (`mcp.server.fastmcp.FastMCP`), transport Streamable HTTP :
+  `connect_session`, `system_info`, `run_command`, `run_shell`,
+  `terminate_session` (kill-switch, phase 5), `issue_client_token` (émission
+  de jeton client `per_session`, phase 5) et `read_file`/`write_file`
+  (transfert de fichiers, phase 6 — réservés aux clients déclarant la
+  capacité `file_transfer`). Une lecture (`read_file`) agrège plusieurs
+  `file_chunk` client→relay en un seul résultat ; une écriture (`write_file`)
+  part en une seule trame `command` (pas de découpage relay→client), d'où le
+  plafond commun de 8 Mio — voir `docs/PROTOCOL.md` §4.
 - `app.py` — application FastAPI : monte `/ws/client`, `/mcp`, `/healthz`,
   point d'entrée `uvicorn relay.app:app`.
 
@@ -71,7 +77,7 @@ python -m pytest tests/relay -q
 Développés en TDD (test rouge avant l'implémentation), couvrant : format et
 unicité des codes de session, TTL du `SessionStore`, corrélation
 `request_id` et gestion d'erreurs (session inconnue/expirée, client
-déconnecté en cours de commande, timeout) dans `broker.py`, les 4 outils MCP
+déconnecté en cours de commande, timeout) dans `broker.py`, les outils MCP
 via le vrai SDK, et un test d'intégration bout-en-bout sur un vrai socket
 WebSocket (`register` → `registered` avec code 9 chiffres → `command` →
 `stream`/`result` → agrégation).

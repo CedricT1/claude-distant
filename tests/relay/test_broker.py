@@ -64,7 +64,7 @@ class TestDispatchCommandHappyPath:
         chunks = await task
         assert chunks == [
             {"type": "stream", "stream": "stdout", "data": "hi\n"},
-            {"type": "result", "exit_code": 0, "error": None},
+            {"type": "result", "exit_code": 0, "error": None, "meta": None},
         ]
 
     async def test_different_requests_do_not_cross_talk(self, broker):
@@ -97,8 +97,8 @@ class TestDispatchCommandHappyPath:
 
         result_a = await task_a
         result_b = await task_b
-        assert result_a == [{"type": "result", "exit_code": 0, "error": None}]
-        assert result_b == [{"type": "result", "exit_code": 1, "error": None}]
+        assert result_a == [{"type": "result", "exit_code": 0, "error": None, "meta": None}]
+        assert result_b == [{"type": "result", "exit_code": 1, "error": None, "meta": None}]
 
 
 class TestDispatchCommandErrors:
@@ -231,7 +231,322 @@ class TestCommandPolicyWiring:
             conn, {"type": "result", "request_id": request_id, "exit_code": 0, "error": None}
         )
         chunks = await task
-        assert chunks == [{"type": "result", "exit_code": 0, "error": None}]
+        assert chunks == [{"type": "result", "exit_code": 0, "error": None, "meta": None}]
+
+
+class TestCapabilitiesRegistration:
+    """`register_connection` transmet (ou non) les capacités déclarées au store."""
+
+    async def test_register_without_capabilities_stores_empty_tuple(self, broker, store):
+        # Ancien client : l'appel historique à 4 arguments reste valide.
+        conn = FakeConnection()
+        code = await broker.register_connection(conn, os="linux", hostname="h", version="0.1.0")
+        record = await store.get(code)
+        assert record.capabilities == ()
+
+    async def test_register_with_capabilities_propagates_them(self, broker, store):
+        conn = FakeConnection()
+        code = await broker.register_connection(
+            conn, os="linux", hostname="h", version="0.2.0", capabilities=["file_transfer"]
+        )
+        record = await store.get(code)
+        assert record.capabilities == ("file_transfer",)
+
+
+class TestFileChunkRouting:
+    """`file_chunk` est routé comme un chunk **non final**, à l'image de `stream`."""
+
+    async def test_file_chunks_are_forwarded_then_terminated_by_result(self, broker):
+        conn = FakeConnection()
+        code = await broker.register_connection(
+            conn, os="linux", hostname="h", version="0.2.0", capabilities=["file_transfer"]
+        )
+
+        async def run():
+            chunks = []
+            async for chunk in broker.dispatch_command(code, "read_file", {"path": "/etc/hosts"}):
+                chunks.append(chunk)
+            return chunks
+
+        task = asyncio.create_task(run())
+        await asyncio.sleep(0)
+        request_id = conn.sent[0]["request_id"]
+
+        await broker.handle_client_message(
+            conn, {"type": "file_chunk", "request_id": request_id, "seq": 0, "data": "aGVsbG8g"}
+        )
+        await broker.handle_client_message(
+            conn, {"type": "file_chunk", "request_id": request_id, "seq": 1, "data": "d29ybGQ="}
+        )
+        await broker.handle_client_message(
+            conn,
+            {
+                "type": "result",
+                "request_id": request_id,
+                "exit_code": 0,
+                "error": None,
+                "meta": {"path": "/etc/hosts", "size": 11, "sha256": "abc", "truncated": False},
+            },
+        )
+
+        chunks = await task
+        assert chunks == [
+            {"type": "file_chunk", "seq": 0, "data": "aGVsbG8g"},
+            {"type": "file_chunk", "seq": 1, "data": "d29ybGQ="},
+            {
+                "type": "result",
+                "exit_code": 0,
+                "error": None,
+                "meta": {"path": "/etc/hosts", "size": 11, "sha256": "abc", "truncated": False},
+            },
+        ]
+
+    async def test_file_chunk_from_another_connection_is_ignored(self, broker):
+        conn = FakeConnection()
+        intruder = FakeConnection()
+        code = await broker.register_connection(
+            conn, os="linux", hostname="h", version="0.2.0", capabilities=["file_transfer"]
+        )
+
+        async def run():
+            chunks = []
+            async for chunk in broker.dispatch_command(code, "read_file", {"path": "/etc/hosts"}):
+                chunks.append(chunk)
+            return chunks
+
+        task = asyncio.create_task(run())
+        await asyncio.sleep(0)
+        request_id = conn.sent[0]["request_id"]
+
+        await broker.handle_client_message(
+            intruder, {"type": "file_chunk", "request_id": request_id, "seq": 0, "data": "cHduZWQ="}
+        )
+        await broker.handle_client_message(
+            conn, {"type": "result", "request_id": request_id, "exit_code": 0, "error": None}
+        )
+
+        chunks = await task
+        assert chunks == [{"type": "result", "exit_code": 0, "error": None, "meta": None}]
+
+
+class TestResultMeta:
+    """Le champ optionnel `meta` du `result` est propagé tel quel dans le chunk."""
+
+    async def test_meta_is_propagated_when_present(self, broker):
+        conn = FakeConnection()
+        code = await broker.register_connection(conn, os="linux", hostname="h", version="0.2.0")
+
+        async def run():
+            chunks = []
+            async for chunk in broker.dispatch_command(code, "write_file", {"path": "/tmp/f"}):
+                chunks.append(chunk)
+            return chunks
+
+        task = asyncio.create_task(run())
+        await asyncio.sleep(0)
+        request_id = conn.sent[0]["request_id"]
+        await broker.handle_client_message(
+            conn,
+            {
+                "type": "result",
+                "request_id": request_id,
+                "exit_code": 0,
+                "error": None,
+                "meta": {"bytes_written": 5, "sha256": "deadbeef"},
+            },
+        )
+        chunks = await task
+        assert chunks[-1]["meta"] == {"bytes_written": 5, "sha256": "deadbeef"}
+
+    async def test_meta_is_none_for_a_legacy_client(self, broker):
+        # Un ancien client n'émet jamais `meta` : le chunk porte `None`, et les
+        # agrégateurs de commande doivent continuer à ignorer ce champ.
+        conn = FakeConnection()
+        code = await broker.register_connection(conn, os="linux", hostname="h", version="0.1.0")
+
+        async def run():
+            chunks = []
+            async for chunk in broker.dispatch_command(code, "run_command", {"command": "x"}):
+                chunks.append(chunk)
+            return chunks
+
+        task = asyncio.create_task(run())
+        await asyncio.sleep(0)
+        request_id = conn.sent[0]["request_id"]
+        await broker.handle_client_message(
+            conn, {"type": "result", "request_id": request_id, "exit_code": 0, "error": None}
+        )
+        chunks = await task
+        assert chunks == [{"type": "result", "exit_code": 0, "error": None, "meta": None}]
+
+
+class TestApprovalResponseIsNotFinal:
+    """`approval_response` n'est **pas** un terminateur : seul `result` l'est.
+
+    Correction du bug historique : sous `policy=confirm`, le client Go émet
+    `approval_response(approved=true)` *avant* d'exécuter la commande. Le
+    traiter comme final jetait les `stream`/`result` qui suivaient.
+    """
+
+    async def test_approved_then_stream_and_result_reach_the_harness(self, broker):
+        conn = FakeConnection()
+        code = await broker.register_connection(conn, os="linux", hostname="h", version="1")
+
+        async def run():
+            chunks = []
+            async for chunk in broker.dispatch_command(code, "run_shell", {"command": "ls"}):
+                chunks.append(chunk)
+            return chunks
+
+        task = asyncio.create_task(run())
+        await asyncio.sleep(0)
+        request_id = conn.sent[0]["request_id"]
+
+        await broker.handle_client_message(
+            conn, {"type": "approval_response", "request_id": request_id, "approved": True}
+        )
+        await broker.handle_client_message(
+            conn,
+            {"type": "stream", "request_id": request_id, "stream": "stdout", "data": "a.txt\n"},
+        )
+        await broker.handle_client_message(
+            conn, {"type": "result", "request_id": request_id, "exit_code": 0, "error": None}
+        )
+
+        chunks = await task
+        assert chunks == [
+            {"type": "approval_response", "approved": True},
+            {"type": "stream", "stream": "stdout", "data": "a.txt\n"},
+            {"type": "result", "exit_code": 0, "error": None, "meta": None},
+        ]
+
+    async def test_refusal_is_still_terminated_by_the_client_result(self, broker):
+        conn = FakeConnection()
+        code = await broker.register_connection(conn, os="linux", hostname="h", version="1")
+
+        async def run():
+            chunks = []
+            async for chunk in broker.dispatch_command(code, "run_shell", {"command": "rm -rf /"}):
+                chunks.append(chunk)
+            return chunks
+
+        task = asyncio.create_task(run())
+        await asyncio.sleep(0)
+        request_id = conn.sent[0]["request_id"]
+
+        await broker.handle_client_message(
+            conn, {"type": "approval_response", "request_id": request_id, "approved": False}
+        )
+        await broker.handle_client_message(
+            conn,
+            {"type": "result", "request_id": request_id, "exit_code": 126, "error": "refused_by_user"},
+        )
+
+        chunks = await task
+        assert chunks == [
+            {"type": "approval_response", "approved": False},
+            {"type": "result", "exit_code": 126, "error": "refused_by_user", "meta": None},
+        ]
+
+    async def test_audit_outcome_comes_from_the_final_result(self, store):
+        conn = FakeConnection()
+        audit = FakeAuditLog()
+        broker = Broker(session_store=store, default_ttl_seconds=30, command_timeout=1,
+                        command_policy=CommandPolicy(), audit_log=audit)
+        code = await broker.register_connection(conn, os="linux", hostname="h", version="1")
+
+        async def run():
+            async for _ in broker.dispatch_command(code, "run_shell", {"command": "ls"}):
+                pass
+
+        task = asyncio.create_task(run())
+        await asyncio.sleep(0)
+        request_id = conn.sent[0]["request_id"]
+        await broker.handle_client_message(
+            conn, {"type": "approval_response", "request_id": request_id, "approved": True}
+        )
+        await broker.handle_client_message(
+            conn, {"type": "result", "request_id": request_id, "exit_code": 7, "error": None}
+        )
+        await task
+
+        assert audit.events[-1]["outcome"] == {"exit_code": 7, "error": None}
+
+
+class TestAuditParamsRedaction:
+    """`content_base64` ne doit jamais atterrir tel quel dans le journal d'audit."""
+
+    async def test_content_base64_is_replaced_by_a_size_marker(self, store):
+        conn = FakeConnection()
+        audit = FakeAuditLog()
+        broker = Broker(session_store=store, default_ttl_seconds=30, command_timeout=1,
+                        audit_log=audit)
+        code = await broker.register_connection(
+            conn, os="linux", hostname="h", version="0.2.0", capabilities=["file_transfer"]
+        )
+        payload = "QUJDRA==" * 64
+        params = {"path": "/tmp/f", "content_base64": payload}
+
+        async def run():
+            async for _ in broker.dispatch_command(code, "write_file", params):
+                pass
+
+        task = asyncio.create_task(run())
+        await asyncio.sleep(0)
+        request_id = conn.sent[0]["request_id"]
+        await broker.handle_client_message(
+            conn, {"type": "result", "request_id": request_id, "exit_code": 0, "error": None}
+        )
+        await task
+
+        recorded = audit.events[-1]["params"]
+        assert recorded["path"] == "/tmp/f"
+        assert recorded["content_base64"] == f"<base64 redacted: {len(payload)} chars>"
+        # Le dict d'origine (et donc la trame envoyée au client) reste intact.
+        assert params["content_base64"] == payload
+        assert conn.sent[0]["params"]["content_base64"] == payload
+
+    async def test_redaction_also_applies_to_a_denied_dispatch(self, store):
+        conn = FakeConnection()
+        audit = FakeAuditLog()
+        broker = Broker(session_store=store, default_ttl_seconds=30, command_timeout=1,
+                        command_policy=CommandPolicy(max_commands_per_session=0), audit_log=audit)
+        code = await broker.register_connection(
+            conn, os="linux", hostname="h", version="0.2.0", capabilities=["file_transfer"]
+        )
+        payload = "QUJDRA=="
+
+        with pytest.raises(CommandDeniedError):
+            async for _ in broker.dispatch_command(
+                code, "write_file", {"path": "/tmp/f", "content_base64": payload}
+            ):
+                pass
+
+        assert audit.events[-1]["decision"] == "denied"
+        assert audit.events[-1]["params"]["content_base64"] == (
+            f"<base64 redacted: {len(payload)} chars>"
+        )
+
+    async def test_params_without_content_are_left_untouched(self, store):
+        conn = FakeConnection()
+        audit = FakeAuditLog()
+        broker = Broker(session_store=store, default_ttl_seconds=30, command_timeout=1,
+                        audit_log=audit)
+        code = await broker.register_connection(conn, os="linux", hostname="h", version="1")
+
+        async def run():
+            async for _ in broker.dispatch_command(code, "run_shell", {"command": "echo hi"}):
+                pass
+
+        task = asyncio.create_task(run())
+        await asyncio.sleep(0)
+        request_id = conn.sent[0]["request_id"]
+        await broker.handle_client_message(
+            conn, {"type": "result", "request_id": request_id, "exit_code": 0, "error": None}
+        )
+        await task
+
+        assert audit.events[-1]["params"] == {"command": "echo hi"}
 
 
 class TestHeartbeat:

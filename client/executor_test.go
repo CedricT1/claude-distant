@@ -2,9 +2,19 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // Red-first tests for interpreter selection (resolveShell / buildShellArgv
@@ -223,6 +233,378 @@ func TestExecutor_ResolveApproval_OnceAnswerDoesNotMemoize(t *testing.T) {
 	e.resolveApproval("shutdown -h now")
 	if calls != 2 {
 		t.Errorf("calls = %d, want 2 (a plain 'oui' must not be memorized)", calls)
+	}
+}
+
+// --- Transfert de fichiers : garde-fou local et câblage des messages ---
+//
+// Conn is a concrete type wrapping a real *websocket.Conn, so these tests
+// dial a throwaway relay that decodes everything the Executor writes. That
+// exercises the true send path (file_chunk, approval_response, result+meta)
+// instead of a hand-rolled double.
+
+// newLoopbackConn returns a live Conn plus the stream of messages the client
+// writes to it, both torn down at the end of the test.
+func newLoopbackConn(t *testing.T) (*Conn, <-chan map[string]any) {
+	t.Helper()
+
+	recv := make(chan map[string]any, 256)
+	upgrader := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		for {
+			var msg map[string]any
+			if err := c.ReadJSON(&msg); err != nil {
+				return
+			}
+			select {
+			case recv <- msg:
+			default:
+			}
+		}
+	}))
+
+	conn, err := DialRelay(context.Background(), "ws"+strings.TrimPrefix(srv.URL, "http")+"/ws/client", "test-token", false)
+	if err != nil {
+		srv.Close()
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = conn.Close()
+		srv.Close()
+	})
+	return conn, recv
+}
+
+// collectUntilResult drains recv until the terminating `result` message
+// arrives, returning everything received in order.
+func collectUntilResult(t *testing.T, recv <-chan map[string]any) []map[string]any {
+	t.Helper()
+	var msgs []map[string]any
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case m := <-recv:
+			msgs = append(msgs, m)
+			if m["type"] == "result" {
+				return msgs
+			}
+		case <-deadline:
+			t.Fatalf("timeout: aucun message result reçu (messages = %v)", msgs)
+			return nil
+		}
+	}
+}
+
+func messagesOfType(msgs []map[string]any, msgType string) []map[string]any {
+	var out []map[string]any
+	for _, m := range msgs {
+		if m["type"] == msgType {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// singleMessage returns the only message of msgType, failing otherwise.
+func singleMessage(t *testing.T, msgs []map[string]any, msgType string) map[string]any {
+	t.Helper()
+	got := messagesOfType(msgs, msgType)
+	if len(got) != 1 {
+		t.Fatalf("%d messages de type %q, attendu 1 (messages = %v)", len(got), msgType, msgs)
+	}
+	return got[0]
+}
+
+func assertResult(t *testing.T, msgs []map[string]any, wantExitCode float64, wantError any) map[string]any {
+	t.Helper()
+	res := singleMessage(t, msgs, "result")
+	if res["exit_code"] != wantExitCode {
+		t.Errorf("exit_code = %v, want %v", res["exit_code"], wantExitCode)
+	}
+	if res["error"] != wantError {
+		t.Errorf("error = %v, want %v", res["error"], wantError)
+	}
+	return res
+}
+
+func assertApproval(t *testing.T, msgs []map[string]any, wantApproved bool) {
+	t.Helper()
+	ar := singleMessage(t, msgs, "approval_response")
+	if ar["approved"] != wantApproved {
+		t.Errorf("approval_response.approved = %v, want %v", ar["approved"], wantApproved)
+	}
+}
+
+// fileCommand builds a `command` message for one of the two transfer tools.
+func fileCommand(t *testing.T, requestID, tool string, params map[string]any) CommandMessage {
+	t.Helper()
+	raw, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+	return CommandMessage{Type: TypeCommand, RequestID: requestID, Tool: tool, Params: raw}
+}
+
+// recordingConfirm captures the descriptions the guard-rail prompt is asked
+// about, and answers with the canned decision.
+type recordingConfirm struct {
+	descriptions []string
+	approve      bool
+	always       bool
+}
+
+func (r *recordingConfirm) fn(description string) (bool, bool) {
+	r.descriptions = append(r.descriptions, description)
+	return r.approve, r.always
+}
+
+func TestExecutor_ReadFile_PolicyDenyRefusesWithoutReadingTheFile(t *testing.T) {
+	path := writeTempFile(t, t.TempDir(), "secret.txt", []byte("données confidentielles"))
+	conn, recv := newLoopbackConn(t)
+
+	confirm := &recordingConfirm{approve: true}
+	e := NewExecutor(conn, PolicyDeny, confirm.fn, "")
+	e.Handle(context.Background(), fileCommand(t, "r1", "read_file", map[string]any{"path": path}))
+
+	msgs := collectUntilResult(t, recv)
+	assertApproval(t, msgs, false)
+	assertResult(t, msgs, 126, "refused_by_policy")
+	if n := len(messagesOfType(msgs, "file_chunk")); n != 0 {
+		t.Errorf("%d file_chunk émis sous PolicyDeny, attendu 0 (aucune exfiltration)", n)
+	}
+	if len(confirm.descriptions) != 0 {
+		t.Errorf("confirm appelé sous PolicyDeny: %v", confirm.descriptions)
+	}
+}
+
+func TestExecutor_WriteFile_PolicyDenyRefusesWithoutTouchingDisk(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nouveau.txt")
+	conn, recv := newLoopbackConn(t)
+
+	confirm := &recordingConfirm{approve: true}
+	e := NewExecutor(conn, PolicyDeny, confirm.fn, "")
+	e.Handle(context.Background(), fileCommand(t, "r1", "write_file", map[string]any{
+		"path":           path,
+		"content_base64": base64.StdEncoding.EncodeToString([]byte("charge utile")),
+	}))
+
+	msgs := collectUntilResult(t, recv)
+	assertApproval(t, msgs, false)
+	assertResult(t, msgs, 126, "refused_by_policy")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("le fichier a été écrit alors que la politique est deny")
+	}
+	if len(confirm.descriptions) != 0 {
+		t.Errorf("confirm appelé sous PolicyDeny: %v", confirm.descriptions)
+	}
+}
+
+func TestExecutor_ReadFile_PolicyConfirmPromptsAndHonorsRefusal(t *testing.T) {
+	path := writeTempFile(t, t.TempDir(), "secret.txt", []byte("données confidentielles"))
+	conn, recv := newLoopbackConn(t)
+
+	confirm := &recordingConfirm{approve: false}
+	e := NewExecutor(conn, PolicyConfirm, confirm.fn, "")
+	e.Handle(context.Background(), fileCommand(t, "r1", "read_file", map[string]any{"path": path}))
+
+	msgs := collectUntilResult(t, recv)
+	wantDesc := "read_file " + path
+	if len(confirm.descriptions) != 1 || confirm.descriptions[0] != wantDesc {
+		t.Fatalf("descriptions confirmées = %v, want [%q]", confirm.descriptions, wantDesc)
+	}
+	assertApproval(t, msgs, false)
+	assertResult(t, msgs, 126, "refused_by_user")
+	if n := len(messagesOfType(msgs, "file_chunk")); n != 0 {
+		t.Errorf("%d file_chunk émis après refus, attendu 0", n)
+	}
+}
+
+func TestExecutor_ReadFile_PolicyConfirmApprovedPerformsTransfer(t *testing.T) {
+	content := []byte("ligne 1\nligne 2\n")
+	path := writeTempFile(t, t.TempDir(), "data.txt", content)
+	conn, recv := newLoopbackConn(t)
+
+	confirm := &recordingConfirm{approve: true}
+	e := NewExecutor(conn, PolicyConfirm, confirm.fn, "")
+	e.Handle(context.Background(), fileCommand(t, "r1", "read_file", map[string]any{"path": path}))
+
+	msgs := collectUntilResult(t, recv)
+	if len(confirm.descriptions) != 1 {
+		t.Fatalf("confirm appelé %d fois, attendu 1", len(confirm.descriptions))
+	}
+	assertApproval(t, msgs, true)
+
+	chunks := messagesOfType(msgs, "file_chunk")
+	if len(chunks) != 1 {
+		t.Fatalf("%d file_chunk reçus, attendu 1", len(chunks))
+	}
+	if chunks[0]["request_id"] != "r1" || chunks[0]["seq"] != float64(0) {
+		t.Errorf("file_chunk inattendu: %v", chunks[0])
+	}
+	raw, err := base64.StdEncoding.DecodeString(chunks[0]["data"].(string))
+	if err != nil {
+		t.Fatalf("base64 du chunk: %v", err)
+	}
+	if string(raw) != string(content) {
+		t.Errorf("contenu transféré = %q, want %q", raw, content)
+	}
+
+	res := assertResult(t, msgs, 0, nil)
+	meta, ok := res["meta"].(map[string]any)
+	if !ok {
+		t.Fatalf("result.meta = %#v, objet attendu", res["meta"])
+	}
+	if meta["path"] != path || meta["size"] != float64(len(content)) ||
+		meta["sha256"] != sha256Hex(content) || meta["truncated"] != false {
+		t.Errorf("meta = %v, attendu path/size/sha256/truncated cohérents", meta)
+	}
+}
+
+func TestExecutor_WriteFile_PolicyConfirmPromptsWithSizeAndHonorsRefusal(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nouveau.txt")
+	content := []byte("charge utile")
+	conn, recv := newLoopbackConn(t)
+
+	confirm := &recordingConfirm{approve: false}
+	e := NewExecutor(conn, PolicyConfirm, confirm.fn, "")
+	e.Handle(context.Background(), fileCommand(t, "r1", "write_file", map[string]any{
+		"path":           path,
+		"content_base64": base64.StdEncoding.EncodeToString(content),
+	}))
+
+	msgs := collectUntilResult(t, recv)
+	wantDesc := "write_file " + path + " (12 octets)"
+	if len(confirm.descriptions) != 1 || confirm.descriptions[0] != wantDesc {
+		t.Fatalf("descriptions confirmées = %v, want [%q]", confirm.descriptions, wantDesc)
+	}
+	assertApproval(t, msgs, false)
+	assertResult(t, msgs, 126, "refused_by_user")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("le fichier a été écrit alors que l'opérateur a refusé")
+	}
+}
+
+func TestExecutor_WriteFile_PolicyConfirmApprovedPerformsTransfer(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nouveau.txt")
+	content := []byte("charge utile")
+	conn, recv := newLoopbackConn(t)
+
+	confirm := &recordingConfirm{approve: true}
+	e := NewExecutor(conn, PolicyConfirm, confirm.fn, "")
+	e.Handle(context.Background(), fileCommand(t, "r1", "write_file", map[string]any{
+		"path":           path,
+		"content_base64": base64.StdEncoding.EncodeToString(content),
+	}))
+
+	msgs := collectUntilResult(t, recv)
+	assertApproval(t, msgs, true)
+	res := assertResult(t, msgs, 0, nil)
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("relecture: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Errorf("contenu écrit = %q, want %q", got, content)
+	}
+	meta, ok := res["meta"].(map[string]any)
+	if !ok {
+		t.Fatalf("result.meta = %#v, objet attendu", res["meta"])
+	}
+	if meta["path"] != path || meta["bytes_written"] != float64(len(content)) || meta["sha256"] != sha256Hex(content) {
+		t.Errorf("meta = %v, attendu path/bytes_written/sha256 cohérents", meta)
+	}
+}
+
+func TestExecutor_ReadFile_PolicyAutoNeverPrompts(t *testing.T) {
+	content := []byte("contenu\n")
+	path := writeTempFile(t, t.TempDir(), "data.txt", content)
+	conn, recv := newLoopbackConn(t)
+
+	confirm := &recordingConfirm{approve: false}
+	e := NewExecutor(conn, PolicyAuto, confirm.fn, "")
+	e.Handle(context.Background(), fileCommand(t, "r1", "read_file", map[string]any{"path": path}))
+
+	msgs := collectUntilResult(t, recv)
+	if len(confirm.descriptions) != 0 {
+		t.Errorf("confirm appelé sous PolicyAuto: %v", confirm.descriptions)
+	}
+	if n := len(messagesOfType(msgs, "approval_response")); n != 0 {
+		t.Errorf("%d approval_response sous PolicyAuto, attendu 0 (aucun garde-fou engagé)", n)
+	}
+	if n := len(messagesOfType(msgs, "file_chunk")); n != 1 {
+		t.Fatalf("%d file_chunk reçus, attendu 1", n)
+	}
+	assertResult(t, msgs, 0, nil)
+}
+
+func TestExecutor_WriteFile_PolicyAutoNeverPrompts(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auto.txt")
+	conn, recv := newLoopbackConn(t)
+
+	confirm := &recordingConfirm{approve: false}
+	e := NewExecutor(conn, PolicyAuto, confirm.fn, "")
+	e.Handle(context.Background(), fileCommand(t, "r1", "write_file", map[string]any{
+		"path":           path,
+		"content_base64": base64.StdEncoding.EncodeToString([]byte("auto")),
+	}))
+
+	msgs := collectUntilResult(t, recv)
+	if len(confirm.descriptions) != 0 {
+		t.Errorf("confirm appelé sous PolicyAuto: %v", confirm.descriptions)
+	}
+	if n := len(messagesOfType(msgs, "approval_response")); n != 0 {
+		t.Errorf("%d approval_response sous PolicyAuto, attendu 0", n)
+	}
+	assertResult(t, msgs, 0, nil)
+	assertFileContent(t, path, []byte("auto"))
+}
+
+// Le code d'erreur stable du transfert doit remonter tel quel dans
+// result.error, pour que le harnais puisse le traiter.
+func TestExecutor_ReadFile_MissingFileReportsStableErrorCode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "absent.txt")
+	conn, recv := newLoopbackConn(t)
+
+	e := NewExecutor(conn, PolicyAuto, nil, "")
+	e.Handle(context.Background(), fileCommand(t, "r1", "read_file", map[string]any{"path": path}))
+
+	msgs := collectUntilResult(t, recv)
+	res := singleMessage(t, msgs, "result")
+	if res["error"] != "file_not_found" {
+		t.Errorf("error = %v, want file_not_found", res["error"])
+	}
+	if res["exit_code"] == float64(0) {
+		t.Error("exit_code = 0 alors que la lecture a échoué")
+	}
+}
+
+func TestExecutor_WriteFile_InvalidBase64ReportsStableErrorCode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.txt")
+	conn, recv := newLoopbackConn(t)
+
+	e := NewExecutor(conn, PolicyAuto, nil, "")
+	e.Handle(context.Background(), fileCommand(t, "r1", "write_file", map[string]any{
+		"path":           path,
+		"content_base64": "pas du base64 !!",
+	}))
+
+	msgs := collectUntilResult(t, recv)
+	res := singleMessage(t, msgs, "result")
+	if res["error"] != "invalid_base64" {
+		t.Errorf("error = %v, want invalid_base64", res["error"])
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("un fichier a été créé malgré un base64 invalide")
 	}
 }
 

@@ -125,8 +125,14 @@ docker-compose -f docker/docker-compose.yml down -v
 
 - **Tokens** : jamais de secrets en dur dans les Dockerfile ou fichiers source. Tous les secrets viennent du `.env` ou des secrets Docker.
 - **TLS** : reverse-proxy TLS strict fourni (Caddy, profil `tls` — voir ci-dessus ; alternative Nginx dans `docker/nginx.conf.example`). Le relay lui-même ne parle jamais TLS.
-- **Auth MCP** : `MCP_AUTH_MODE=static_bearer` (défaut) ou `oauth` (JWT scopés, voir `docs/SECURITY.md`).
+- **Auth MCP** : `MCP_AUTH_MODE=static_bearer` (défaut) ou `oauth` (JWT scopés — dont `file:read`/`file:write` pour `read_file`/`write_file`, voir `docs/SECURITY.md`).
 - **Healthcheck** : le relay expose un endpoint `/healthz` utilisé par Docker pour surveiller la santé du conteneur.
+- **Transfert de fichiers** : `read_file`/`write_file` élargissent nettement
+  la surface d'attaque par rapport à la seule exécution de commandes (pas de
+  confinement de chemin, sémantique des liens symboliques). Aucune variable
+  d'environnement supplémentaire n'est requise pour les activer — voir
+  [`docs/SECURITY.md`](../docs/SECURITY.md) § « Surface d'attaque élargie par
+  le transfert de fichiers » pour le détail et les mitigations.
 
 Voir [`docs/SECURITY.md`](../docs/SECURITY.md) pour le modèle de menace complet.
 

@@ -69,6 +69,20 @@ WS_AUTH_FAILED_CLOSE_CODE = 4401  # code custom (plage 4000-4999), miroir du 401
 WS_SESSION_TERMINATED_CLOSE_CODE = 4402  # kill-switch : session invalidée côté harnais
 
 
+def _normalize_capabilities(raw: Any) -> tuple[str, ...]:
+    """Normalise le champ optionnel `capabilities` d'un `register` client.
+
+    Le champ vient du réseau : il peut être absent (ancien client), ou
+    malformé. On n'accepte qu'une vraie séquence (`list`/`tuple`) et on n'en
+    retient que les éléments `str` — une chaîne nue serait sinon itérée
+    caractère par caractère et un `dict` par ses clés, ce qui inventerait des
+    capacités jamais déclarées. Tout le reste retombe sur `()`, la valeur sûre.
+    """
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(item for item in raw if isinstance(item, str))
+
+
 class _WebSocketConnection:
     """Adapte la WebSocket FastAPI réelle à l'interface `ConnectionLike` du broker."""
 
@@ -196,13 +210,14 @@ def create_app(
                         os=message.get("os", "unknown"),
                         hostname=message.get("hostname", ""),
                         version=message.get("version", ""),
+                        capabilities=_normalize_capabilities(message.get("capabilities")),
                     )
                     await websocket.send_json({"type": "registered", "session_code": session_code})
                 elif msg_type == "heartbeat":
                     if session_code is not None:
                         await broker.heartbeat(session_code)
                     await websocket.send_json({"type": "heartbeat_ack"})
-                elif msg_type in ("stream", "result", "approval_response"):
+                elif msg_type in ("stream", "result", "approval_response", "file_chunk"):
                     await broker.handle_client_message(connection, message)
                 # types inconnus : ignorés silencieusement (extension tolérante du protocole)
         except WebSocketDisconnect:

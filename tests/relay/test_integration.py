@@ -49,6 +49,25 @@ def _connect(port: int, token: str | None = CLIENT_TOKEN):
     return websockets.connect(_uri(port), additional_headers=headers, proxy=None)
 
 
+async def _call_tool(app, name: str, arguments: dict):
+    """Appelle un outil MCP de l'app réelle et retourne son résultat structuré."""
+    result = await app.state.mcp.call_tool(name, arguments)
+    if isinstance(result, tuple):
+        _content, structured = result
+        return structured
+    return json.loads(result[0].text)
+
+
+async def _register(ws, **extra) -> str:
+    """Effectue le handshake `register` → `registered` et retourne le code de session."""
+    message = {"type": "register", "os": "linux", "hostname": "h", "version": "0.1.0"}
+    message.update(extra)
+    await ws.send(json.dumps(message))
+    reply = json.loads(await ws.recv())
+    assert reply["type"] == "registered"
+    return reply["session_code"]
+
+
 class TestPerSessionClientAuth:
     """Mode `CLIENT_AUTH_MODE=per_session` : jeton client court, lié à la session."""
 
@@ -206,7 +225,7 @@ class TestDispatchCommandOverRealWebSocket:
             await client_task
             assert chunks == [
                 {"type": "stream", "stream": "stdout", "data": "hello\n"},
-                {"type": "result", "exit_code": 0, "error": None},
+                {"type": "result", "exit_code": 0, "error": None, "meta": None},
             ]
 
     async def test_session_not_found_for_unknown_code(self, running_app):
@@ -237,3 +256,214 @@ class TestDispatchCommandOverRealWebSocket:
 
         with pytest.raises(ClientDisconnectedError):
             await asyncio.wait_for(task, timeout=5)
+
+
+class TestLegacyClientWithoutCapabilities:
+    """Non-régression cardinale : un client **déjà déployé** (aucun champ
+    `capabilities` dans son `register`) reste pleinement utilisable face à un
+    relay mis à jour, et les nouveaux outils fichiers lui répondent
+    `unsupported_by_client` sans jamais lui envoyer de `command` inconnue.
+    """
+
+    async def test_session_without_capabilities_still_runs_shell_commands(self, running_app):
+        app, port = running_app
+        async with _connect(port) as ws:
+            code = await _register(ws, hostname="old-client", version="0.1.0")
+
+            record = await app.state.broker.get_session_info(code)
+            assert record.capabilities == ()
+
+            async def fake_client_loop():
+                message = json.loads(await ws.recv())
+                assert message["type"] == "command"
+                assert message["tool"] == "run_shell"
+                request_id = message["request_id"]
+                await ws.send(
+                    json.dumps(
+                        {"type": "stream", "request_id": request_id, "stream": "stdout", "data": "hello\n"}
+                    )
+                )
+                await ws.send(
+                    json.dumps({"type": "result", "request_id": request_id, "exit_code": 0, "error": None})
+                )
+
+            client_task = asyncio.create_task(fake_client_loop())
+            result = await _call_tool(
+                app, "run_shell", {"session_code": code, "command": "echo hello", "timeout": 5}
+            )
+            await client_task
+
+            assert result["status"] == "ok"
+            assert result["stdout"] == "hello\n"
+            assert result["exit_code"] == 0
+            assert result["error"] is None
+            assert "meta" not in result  # sortie d'outil de commande inchangée
+
+    async def test_file_tools_refuse_without_sending_any_command(self, running_app):
+        app, port = running_app
+        async with _connect(port) as ws:
+            code = await _register(ws, hostname="old-client", version="0.1.0")
+
+            read = await _call_tool(app, "read_file", {"session_code": code, "path": "/etc/hosts"})
+            assert read["status"] == "error"
+            assert read["error"] == "unsupported_by_client"
+            assert read["client_version"] == "0.1.0"
+            assert read["capabilities"] == []
+
+            written = await _call_tool(
+                app,
+                "write_file",
+                {"session_code": code, "path": "/tmp/f", "content_base64": "aGk="},
+            )
+            assert written["error"] == "unsupported_by_client"
+
+            # Aucun message n'a été poussé vers le client : il n'a donc jamais eu
+            # à ignorer un `tool` qu'il ne connaît pas.
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(ws.recv(), timeout=0.3)
+
+    async def test_connect_session_reports_no_capability(self, running_app):
+        app, port = running_app
+        async with _connect(port) as ws:
+            code = await _register(ws, version="0.1.0")
+            info = await _call_tool(app, "connect_session", {"session_code": code})
+            assert info["status"] == "connected"
+            assert info["capabilities"] == []
+
+
+class TestCapabilityAwareClient:
+    """Un client à jour déclare `capabilities` ; le relay le propage jusqu'au harnais."""
+
+    async def test_declared_capabilities_are_visible_from_connect_session(self, running_app):
+        app, port = running_app
+        async with _connect(port) as ws:
+            code = await _register(ws, version="0.2.0", capabilities=["file_transfer"])
+            record = await app.state.broker.get_session_info(code)
+            assert record.capabilities == ("file_transfer",)
+            info = await _call_tool(app, "connect_session", {"session_code": code})
+            assert info["capabilities"] == ["file_transfer"]
+
+    async def test_read_file_reaches_a_capable_client(self, running_app):
+        app, port = running_app
+        async with _connect(port) as ws:
+            code = await _register(ws, version="0.2.0", capabilities=["file_transfer"])
+
+            async def fake_client_loop():
+                message = json.loads(await ws.recv())
+                assert message["type"] == "command"
+                assert message["tool"] == "read_file"
+                assert message["params"] == {"path": "/etc/hosts"}
+                request_id = message["request_id"]
+                await ws.send(
+                    json.dumps(
+                        {"type": "file_chunk", "request_id": request_id, "seq": 0, "data": "aGVsbG8="}
+                    )
+                )
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "request_id": request_id,
+                            "exit_code": 0,
+                            "error": None,
+                            "meta": {"path": "/etc/hosts", "size": 5, "sha256": "x", "truncated": False},
+                        }
+                    )
+                )
+
+            client_task = asyncio.create_task(fake_client_loop())
+            result = await _call_tool(app, "read_file", {"session_code": code, "path": "/etc/hosts"})
+            await client_task
+
+            assert result["status"] == "ok"
+            assert result["content_base64"] == "aGVsbG8="
+            assert result["size"] == 5
+
+    @pytest.mark.parametrize(
+        "declared, expected",
+        [
+            ("file_transfer", ()),  # chaîne : séquence de caractères, jamais une capacité
+            ({"file_transfer": True}, ()),
+            (123, ()),
+            ([1, "file_transfer", None], ("file_transfer",)),
+        ],
+    )
+    async def test_malformed_capabilities_never_break_registration(
+        self, running_app, declared, expected
+    ):
+        app, port = running_app
+        async with _connect(port) as ws:
+            code = await _register(ws, capabilities=declared)
+            record = await app.state.broker.get_session_info(code)
+            assert record.capabilities == expected
+
+
+class TestFileChunkOverRealWebSocket:
+    async def test_file_chunks_are_routed_to_the_pending_request(self, running_app):
+        app, port = running_app
+        async with _connect(port) as ws:
+            code = await _register(ws, version="0.2.0", capabilities=["file_transfer"])
+
+            async def fake_client_loop():
+                message = json.loads(await ws.recv())
+                request_id = message["request_id"]
+                for seq, data in enumerate(("aGVs", "bG8=")):
+                    await ws.send(
+                        json.dumps(
+                            {"type": "file_chunk", "request_id": request_id, "seq": seq, "data": data}
+                        )
+                    )
+                await ws.send(
+                    json.dumps({"type": "result", "request_id": request_id, "exit_code": 0, "error": None})
+                )
+
+            client_task = asyncio.create_task(fake_client_loop())
+            chunks = []
+            async for chunk in app.state.broker.dispatch_command(
+                code, "read_file", {"path": "/etc/hosts"}, timeout=5
+            ):
+                chunks.append(chunk)
+            await client_task
+
+            assert chunks == [
+                {"type": "file_chunk", "seq": 0, "data": "aGVs"},
+                {"type": "file_chunk", "seq": 1, "data": "bG8="},
+                {"type": "result", "exit_code": 0, "error": None, "meta": None},
+            ]
+
+
+class TestApprovalResponseOverRealWebSocket:
+    async def test_approved_command_still_delivers_its_output(self, running_app):
+        # Reproduit le flot du client Go sous `policy=confirm` : approbation
+        # émise *avant* l'exécution, puis stream/result.
+        app, port = running_app
+        async with _connect(port) as ws:
+            code = await _register(ws)
+
+            async def fake_client_loop():
+                message = json.loads(await ws.recv())
+                request_id = message["request_id"]
+                await ws.send(
+                    json.dumps(
+                        {"type": "approval_response", "request_id": request_id, "approved": True}
+                    )
+                )
+                await ws.send(
+                    json.dumps(
+                        {"type": "stream", "request_id": request_id, "stream": "stdout", "data": "ok\n"}
+                    )
+                )
+                await ws.send(
+                    json.dumps({"type": "result", "request_id": request_id, "exit_code": 0, "error": None})
+                )
+
+            client_task = asyncio.create_task(fake_client_loop())
+            result = await _call_tool(
+                app, "run_shell", {"session_code": code, "command": "whoami", "timeout": 5}
+            )
+            await client_task
+
+            assert result["status"] == "ok"
+            assert result["stdout"] == "ok\n"
+            assert result["exit_code"] == 0
+            assert result["error"] is None

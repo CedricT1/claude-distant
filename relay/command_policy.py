@@ -4,22 +4,47 @@
 `Broker.dispatch_command` avant tout envoi de commande au client distant
 (cf. `relay/broker.py`). Deux mécanismes indépendants :
 
-1. **Allow/denylist** de commandes, appliquée sur le champ `command` des
-   outils `run_command`/`run_shell` (les autres outils, ex. `system_info`,
-   n'ont pas de `command` et ne sont donc jamais filtrés par motif). Les
-   motifs sont des expressions régulières (`re.search`), ce qui couvre aussi
-   bien un simple préfixe (`^apt`) qu'un motif plus riche. La **denylist est
-   toujours prioritaire** : si une commande matche à la fois l'allowlist et
-   la denylist, elle est refusée. Une allowlist non vide devient une liste
-   *restrictive* : seules les commandes qui la matchent passent.
+1. **Allow/denylist**, appliquée sur le *sujet filtrable* de l'outil — voir
+   `_extract_subject` : le champ `command` pour `run_command`/`run_shell`, le
+   champ `path` pour `read_file`/`write_file` (les autres outils, ex.
+   `system_info`, n'ont pas de sujet et ne sont donc jamais filtrés par
+   motif). Les motifs sont des expressions régulières (`re.search`), ce qui
+   couvre aussi bien un simple préfixe (`^apt`) qu'un motif plus riche. La
+   **denylist est toujours prioritaire** : si un sujet matche à la fois
+   l'allowlist et la denylist, il est refusé. Une allowlist non vide devient
+   une liste *restrictive* : seuls les sujets qui la matchent passent.
+
+   **Pourquoi le chemin est le sujet filtrable des outils fichiers** :
+   `read_file`/`write_file` donnent un accès en lecture/écriture arbitraire
+   au système de fichiers de la cible, au même titre que `run_shell` donne un
+   accès d'exécution arbitraire. Sans filtrage, un déployeur qui configure
+   une allowlist/denylist en pensant contraindre tout ce que le harnais peut
+   faire (cas documenté dans `docs/SECURITY.md`) se retrouverait avec un trou
+   béant : `cat /etc/shadow` refusé via `run_shell` mais le même fichier
+   accessible tel quel via `read_file`. Les motifs sont donc appliqués aux
+   **deux familles d'outils avec les mêmes listes** — il n'existe pas de
+   `COMMAND_DENYLIST`/`FILE_DENYLIST` séparés.
+
+   **Compromis rétrocompatibilité assumé** : une denylist déjà en place pour
+   des *commandes* (ex. `rm -rf`, `shutdown`) ne matchera généralement pas un
+   *chemin* de fichier par accident, donc les déploiements existants ne
+   voient pas de nouveaux refus surprise sur `run_command`/`run_shell` (le
+   sujet extrait dépend de l'outil, jamais mélangé entre les deux). En
+   revanche une **allowlist restrictive existante s'applique désormais aussi
+   aux outils fichiers** — c'est le comportement corrigé, volontairement pas
+   rétrocompatible : une allowlist de commandes (ex. `^systemctl status`) qui
+   ne matche aucun chemin de fichier fait donc passer `read_file`/`write_file`
+   en refus systématique tant qu'elle n'est pas élargie. C'est le prix à payer
+   pour qu'une allowlist restrictive contraigne effectivement le harnais dans
+   son ensemble plutôt qu'un sous-ensemble d'outils.
 
 2. **Quotas par session** : nombre max de commandes sur la durée de vie de
    la session (`max_commands_per_session`) et limite de débit sur une
    fenêtre glissante de 60s (`rate_limit_per_minute`). Les quotas s'appliquent
-   à *tous* les outils dispatchés (pas seulement `run_command`/`run_shell`),
-   pour éviter qu'un usage abusif d'un outil sans motif filtrable ne
-   contourne la protection. Une commande refusée (deny/allowlist) ne
-   consomme pas le quota.
+   à *tous* les outils dispatchés (pas seulement ceux avec un sujet
+   filtrable), pour éviter qu'un usage abusif d'un outil sans motif filtrable
+   ne contourne la protection. Un sujet refusé (deny/allowlist) ne consomme
+   pas le quota.
 
 Configuration via variables d'environnement (`CommandPolicy.from_env()`) :
 `COMMAND_DENYLIST` / `COMMAND_ALLOWLIST` (motifs séparés par `;`),
@@ -38,6 +63,7 @@ from typing import Callable
 
 RATE_LIMIT_WINDOW_SECONDS = 60.0
 _COMMAND_TOOLS = ("run_command", "run_shell")
+_FILE_TOOLS = ("read_file", "write_file")
 
 
 @dataclass
@@ -89,29 +115,41 @@ class CommandPolicy:
         )
 
     @staticmethod
-    def _extract_command(tool: str, params: dict) -> str | None:
+    def _extract_subject(tool: str, params: dict) -> str | None:
+        """Retourne le sujet filtrable de `tool`, ou `None` s'il n'en a pas.
+
+        Le sujet est ce à quoi les motifs allow/deny s'appliquent : la
+        commande shell pour `run_command`/`run_shell`, le chemin pour
+        `read_file`/`write_file` (voir docstring de module — c'est le
+        correctif du trou historique où ces deux outils n'étaient jamais
+        filtrés). Les autres outils (`system_info`, `connect_session`, ...)
+        n'ont pas de sujet et ne sont jamais filtrés par motif ; seuls les
+        quotas leur restent applicables.
+        """
         if tool in _COMMAND_TOOLS:
             return params.get("command")
+        if tool in _FILE_TOOLS:
+            return params.get("path")
         return None
 
     def check(self, session_code: str, tool: str, params: dict) -> Decision:
         """Décide si la commande peut être dispatchée au client pour cette session."""
-        command = self._extract_command(tool, params)
+        subject = self._extract_subject(tool, params)
 
         with self._lock:
-            if command is not None:
+            if subject is not None:
                 for pattern in self._deny_patterns:
-                    if pattern.search(command):
+                    if pattern.search(subject):
                         return Decision(
                             allowed=False,
-                            reason=f"commande refusée par la denylist (motif : {pattern.pattern!r})",
+                            reason=f"refusé par la denylist (motif : {pattern.pattern!r})",
                         )
                 if self._allow_patterns and not any(
-                    pattern.search(command) for pattern in self._allow_patterns
+                    pattern.search(subject) for pattern in self._allow_patterns
                 ):
                     return Decision(
                         allowed=False,
-                        reason="commande absente de l'allowlist (liste restrictive)",
+                        reason="absent de l'allowlist (liste restrictive)",
                     )
 
             count = self._counts.get(session_code, 0)

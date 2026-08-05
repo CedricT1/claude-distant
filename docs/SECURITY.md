@@ -30,6 +30,45 @@ Surfaces d'attaque principales et mitigations correspondantes :
 | Répudiation / contestation a posteriori d'une commande exécutée | Journal d'audit JSONL **chaîné par hash** (`relay/audit.py`), falsification détectable (`verify_chain`) |
 | Un harnais compromis ou mal scopé outrepasse son rôle (ex. appelle `terminate_session` alors qu'il ne devrait que lire `system_info`) | Scopes MCP par outil en mode oauth (§3) — principe du moindre privilège par jeton émis |
 | Attaque DNS rebinding contre l'endpoint MCP HTTP | Déléguée au reverse proxy TLS (`server_name`/`Host` strict, §2) plutôt qu'à l'allowlist `localhost`-only par défaut du SDK MCP, inadaptée à un déploiement proxifié — voir note dans `relay/mcp_server.py:create_mcp_server` |
+| Exfiltration de données via `read_file` | Scope `file:read` dédié en mode oauth ; garde-fou local confirm/deny (la lecture d'un fichier déclenche **aussi** la confirmation, pas seulement l'écriture — lire un fichier l'exfiltre de la machine) ; journal d'audit de chaque lecture ; allow/denylist du relay appliquée au chemin |
+| Persistance / altération via `write_file` | Scope `file:write` dédié en mode oauth ; garde-fou local confirm/deny ; audit avec contenu rédigé (pas de fuite de données sensibles dans le journal) ; écriture atomique (pas de fichier cible corrompu par un transfert interrompu) |
+
+## 1bis. Surface d'attaque élargie par le transfert de fichiers
+
+`read_file`/`write_file` élargissent nettement le modèle de menace par rapport
+à la seule exécution de commandes : un opérateur (ou un harnais compromis
+avec les bons scopes) peut désormais lire ou écrire **n'importe quel** fichier
+accessible au processus client, sans passer par un `run_command` visible et
+journalisable comme tel. Limites à connaître, honnêtement :
+
+- **Pas de confinement de chemin.** C'est délibéré : `claude-distant` est un
+  outil d'administration système, pas un partage de fichiers scopé à un
+  répertoire. La protection ne vient donc pas d'un sandbox de chemin, mais de
+  la combinaison scopes MCP + politique du relay (allow/denylist) + garde-fou
+  local — voir `client/filetransfer.go:transferPath` (aucune validation au-delà
+  d'un chemin non vide) et `docs/PROTOCOL.md` §4.
+- **Écriture sur un lien symbolique : le lien est remplacé par un fichier
+  régulier**, pas suivi. Conséquence directe de l'installation atomique
+  (fichier temporaire dans le même répertoire puis `rename`, voir
+  `client/filetransfer.go:writeFileTransfer`) : `rename` remplace l'entrée de
+  répertoire elle-même, il ne déréférence pas la cible du lien. C'est plus sûr
+  que de suivre aveuglément le lien (pas d'écriture surprise ailleurs sur le
+  disque via un lien piégé), mais surprenant pour un administrateur qui
+  s'attendrait à ce que son `write_file` sur un chemin symlinké mette à jour
+  le fichier pointé : le lien est cassé et remplacé.
+- **Répertoire parent symbolique : suivi normalement.** Seul le composant
+  final du chemin bénéficie du comportement ci-dessus ; un lien sur un
+  répertoire intermédiaire est résolu comme d'habitude par l'OS.
+- **Lecture : les liens symboliques sont suivis**, `read_file` renvoie le
+  contenu de la cible du lien (`os.Open` suit les liens par défaut sur
+  Linux/Windows).
+- **Le contenu est rédigé dans l'audit**, jamais conservé en clair :
+  `content_base64` est remplacé par un marqueur de taille
+  (`_redact_params`/`_REDACTED_PARAM_KEYS` dans `relay/broker.py`). L'audit
+  prouve donc qu'un transfert a eu lieu (qui, quand, quel chemin, quelle
+  taille) mais ne permet pas de reconstituer les données transférées après
+  coup — une garantie de confidentialité du journal, pas une preuve
+  d'intégrité du contenu.
 
 Hors périmètre (assumé) : compromission du PC distant lui-même en dehors de
 ce canal, ou compromission du poste opérateur du harnais — ce sont les
@@ -151,6 +190,8 @@ Le relay valide des **jetons Bearer JWT signés HS256** (secret
 | `command:execute` | `run_command`, `run_shell` |
 | `session:terminate` | `terminate_session` |
 | `client:provision` | `issue_client_token` |
+| `file:read` | `read_file` |
+| `file:write` | `write_file` |
 
 Un jeton sans le scope requis reçoit une erreur d'outil claire
 (`{"status": "error", "error": "forbidden_scope", ...}`) et l'événement est
@@ -218,8 +259,16 @@ comportement suspect, sans attendre l'expiration du TTL de session.
 
 ## 7. Politique de commandes
 
-Allow/denylist par expression régulière sur `run_command`/`run_shell`, quotas
-par session (nombre total, débit par minute) — voir
-`relay/command_policy.py`. La denylist est toujours prioritaire sur
-l'allowlist. Configuration via `COMMAND_DENYLIST`/`COMMAND_ALLOWLIST`/
-`MAX_COMMANDS_PER_SESSION`/`RATE_LIMIT_PER_MINUTE`.
+Allow/denylist par expression régulière, quotas par session (nombre total,
+débit par minute) — voir `relay/command_policy.py`. Les motifs s'appliquent
+au **sujet filtrable** de l'outil : le champ `command` pour
+`run_command`/`run_shell`, et le champ `path` pour `read_file`/`write_file`
+— les mêmes listes `COMMAND_DENYLIST`/`COMMAND_ALLOWLIST` couvrent les deux
+familles d'outils, pour qu'une denylist pensée pour contraindre le harnais
+dans son ensemble ne laisse pas un trou béant côté transfert de fichiers
+(ex. `cat /etc/shadow` refusé via `run_shell` mais le même chemin accessible
+tel quel via `read_file` si le filtrage ne portait que sur les commandes). La
+denylist est toujours prioritaire sur l'allowlist. Les autres outils
+(`system_info`, `connect_session`...) n'ont pas de sujet filtrable et ne sont
+soumis qu'aux quotas. Configuration via `COMMAND_DENYLIST`/
+`COMMAND_ALLOWLIST`/`MAX_COMMANDS_PER_SESSION`/`RATE_LIMIT_PER_MINUTE`.

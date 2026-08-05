@@ -1,7 +1,7 @@
 """Tests unitaires pour relay.session_store : génération de code et TTL."""
 import re
 
-from relay.session_store import InMemorySessionStore, generate_session_code
+from relay.session_store import InMemorySessionStore, SessionRecord, generate_session_code
 
 
 class TestGenerateSessionCode:
@@ -36,6 +36,69 @@ class TestInMemorySessionStoreCreate:
         )
         assert second == "999999999"
         assert second != first
+
+
+class TestInMemorySessionStoreCapabilities:
+    """Négociation de capacités : champ additif, optionnel, normalisé en tuple.
+
+    Un ancien client ne déclare aucune capacité : le store doit alors retenir
+    `()` — c'est la valeur qui garantit qu'aucun outil « nouvelle génération »
+    ne lui sera jamais dispatché (cf. `_require_capability` côté MCP).
+    """
+
+    async def test_capabilities_default_to_empty_tuple(self):
+        store = InMemorySessionStore()
+        code = await store.create(
+            connection="conn-1", os="linux", hostname="h1", version="0.1.0", ttl_seconds=30
+        )
+        record = await store.get(code)
+        assert record.capabilities == ()
+
+    async def test_capabilities_are_stored_when_provided(self):
+        store = InMemorySessionStore()
+        code = await store.create(
+            connection="conn-1",
+            os="linux",
+            hostname="h1",
+            version="0.2.0",
+            ttl_seconds=30,
+            capabilities=["file_transfer"],
+        )
+        record = await store.get(code)
+        assert record.capabilities == ("file_transfer",)
+
+    async def test_capabilities_are_normalised_to_a_tuple(self):
+        store = InMemorySessionStore()
+        code = await store.create(
+            connection="conn-1",
+            os="linux",
+            hostname="h1",
+            version="0.2.0",
+            ttl_seconds=30,
+            capabilities=["file_transfer", "future_thing"],
+        )
+        record = await store.get(code)
+        assert isinstance(record.capabilities, tuple)
+        assert record.capabilities == ("file_transfer", "future_thing")
+
+    async def test_explicit_none_is_treated_as_no_capability(self):
+        store = InMemorySessionStore()
+        code = await store.create(
+            connection="conn-1",
+            os="linux",
+            hostname="h1",
+            version="0.1.0",
+            ttl_seconds=30,
+            capabilities=None,
+        )
+        record = await store.get(code)
+        assert record.capabilities == ()
+
+    def test_session_record_defaults_capabilities_for_positional_construction(self):
+        # `capabilities` est ajouté **en dernier** avec une valeur par défaut :
+        # les constructions positionnelles existantes restent valides.
+        record = SessionRecord("123456789", "conn", "linux", "h1", "0.1.0", 0.0, 100.0)
+        assert record.capabilities == ()
 
 
 class TestInMemorySessionStoreGet:

@@ -115,3 +115,67 @@ class TestNonCommandTools:
         policy = CommandPolicy(denylist=["anything"])
         decision = policy.check("123", "system_info", {})
         assert decision.allowed is True
+
+
+class TestFileToolsAreFilteredOnPath:
+    """Défaut 1 : read_file/write_file contournaient l'allow/denylist.
+
+    `_extract_command` ne reconnaissait que `run_command`/`run_shell` ; les
+    outils fichiers passaient toujours avec `command=None`, donc les boucles
+    deny/allow (sous `if command is not None`) ne s'exécutaient jamais pour
+    eux. Ces tests pinnent le sujet filtrable des outils fichiers : le champ
+    `path`.
+    """
+
+    def test_denylist_blocks_read_file_on_matching_path(self):
+        policy = CommandPolicy(denylist=[r"/etc/shadow"])
+        decision = policy.check("123", "read_file", {"path": "/etc/shadow"})
+        assert decision.allowed is False
+        assert decision.reason
+
+    def test_denylist_blocks_write_file_on_matching_path(self):
+        policy = CommandPolicy(denylist=[r"/root/\.ssh"])
+        decision = policy.check(
+            "123",
+            "write_file",
+            {"path": "/root/.ssh/authorized_keys", "content_base64": "eA=="},
+        )
+        assert decision.allowed is False
+        assert decision.reason
+
+    def test_restrictive_allowlist_blocks_non_matching_read_file(self):
+        policy = CommandPolicy(allowlist=[r"^/var/log/"])
+        allowed = policy.check("123", "read_file", {"path": "/var/log/syslog"})
+        assert allowed.allowed is True
+        denied = policy.check("123", "read_file", {"path": "/etc/shadow"})
+        assert denied.allowed is False
+        assert denied.reason
+
+    def test_restrictive_allowlist_blocks_non_matching_write_file(self):
+        policy = CommandPolicy(allowlist=[r"^/tmp/"])
+        allowed = policy.check(
+            "123", "write_file", {"path": "/tmp/report.txt", "content_base64": "eA=="}
+        )
+        assert allowed.allowed is True
+        denied = policy.check(
+            "123",
+            "write_file",
+            {"path": "/root/.ssh/authorized_keys", "content_base64": "eA=="},
+        )
+        assert denied.allowed is False
+
+    def test_command_denylist_does_not_accidentally_block_unrelated_paths(self):
+        # Rétrocompatibilité : une denylist pensée pour des commandes (ex.
+        # `rm -rf`) ne doit pas se mettre à bloquer des chemins qui ne
+        # matchent tout simplement pas le motif.
+        policy = CommandPolicy(denylist=["rm -rf"])
+        decision = policy.check("123", "read_file", {"path": "/home/user/report.txt"})
+        assert decision.allowed is True
+
+    def test_file_tools_still_subject_to_quota(self):
+        # Les quotas s'appliquent déjà à tous les outils ; on vérifie que ça
+        # reste vrai après l'introduction du filtrage par chemin.
+        policy = CommandPolicy(max_commands_per_session=1)
+        code = "123456789"
+        assert policy.check(code, "read_file", {"path": "/a"}).allowed is True
+        assert policy.check(code, "read_file", {"path": "/b"}).allowed is False

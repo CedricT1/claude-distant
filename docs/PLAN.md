@@ -41,6 +41,18 @@ est Claude) pour faire de l'administration système sur un PC Windows ou Ubuntu,
 - **Client : Go** (binaire unique).
 - **Auth MCP : Bearer d'abord, puis OAuth 2.1** en phase de durcissement.
 - **Garde-fou : politique configurable** (`auto` / `confirm` / `deny`) au lancement du client.
+- **Négociation de capacités (`capabilities` du message `register`)** :
+  mécanisme générique de compatibilité ascendante, introduit avec le
+  transfert de fichiers (Phase 4) mais pas limité à lui. Un client déclare à
+  la connexion les extensions qu'il sait traiter (`"file_transfer"` à ce
+  jour) ; le relay refuse un outil dépendant d'une capacité non déclarée
+  **avant tout dispatch**, plutôt que d'envoyer une `command` qu'un client
+  antérieur ignorerait silencieusement jusqu'au timeout. Un client déjà
+  déployé qui n'envoie pas ce champ optionnel se voit attribuer `()` (aucune
+  capacité) et continue de fonctionner exactement comme avant — voir
+  `docs/PROTOCOL.md` § « Négociation de capacités et rétrocompatibilité ».
+  C'est le mécanisme à réutiliser pour toute future extension du protocole
+  qui ne serait pas comprise par tous les clients déployés.
 
 ## 3. Phases
 
@@ -67,8 +79,15 @@ est Claude) pour faire de l'administration système sur un PC Windows ou Ubuntu,
 ### Phase 4 — Couche sysadmin cross-platform
 - Détection OS + outils : `system_info`, `disk_check`/`disk_usage`,
   `list_processes`/`kill_process`, `service_status`/`service_restart`,
-  `logs` (journalctl / Event Log), `read_file`/`write_file`/`list_dir`,
-  `package_update` (apt / Windows Update), `run_command`.
+  `logs` (journalctl / Event Log), `read_file`/`write_file` **(implémenté)**/
+  `list_dir` **(non implémenté)**, `package_update` (apt / Windows Update),
+  `run_command`.
+- `read_file`/`write_file` **(implémenté)** : transfert de fichiers
+  harnais↔cible, plafonné à 8 Mio, réservé aux clients déclarant la capacité
+  `file_transfer` (voir « Négociation de capacités » en §2 ci-dessus) — voir
+  `docs/PROTOCOL.md` §4 et `docs/SECURITY.md` pour le détail protocolaire et
+  les limites de sécurité (pas de confinement de chemin, sémantique des liens
+  symboliques).
 - **Shell natif selon l'OS** : outil `run_shell(command, shell="auto")` qui exécute
   la commande dans **PowerShell** sur Windows et **Bash** sur Linux/Ubuntu.
   - `shell="auto"` (défaut) : le client choisit l'interpréteur selon l'OS détecté.
@@ -79,6 +98,11 @@ est Claude) pour faire de l'administration système sur un PC Windows ou Ubuntu,
     géré (UTF-8 / codepage Windows).
   - Soumis à la même **politique de confirmation** que `run_command` (les shells
     étant la primitive la plus puissante).
+- Le garde-fou local ne se limite pas aux commandes shell : les opérations
+  `read_file`/`write_file` déclenchent **elles aussi** la confirmation locale
+  en mode `confirm` (et sont refusées en mode `deny`), systématiquement et
+  sans passer par la classification « destructif » des commandes — lire un
+  fichier l'exfiltre de la machine, en écrire un la modifie.
 
 ### Phase 5 — Durcissement sécurité
 - **Migration OAuth 2.1** côté harnais ; token par-session court côté client.
@@ -101,11 +125,18 @@ disk_check() / disk_usage()
 list_processes() / kill_process(pid)
 service_status(name) / service_restart(name)
 logs(source, lines)
-read_file(path) / write_file(path) / list_dir(path)
+read_file(path, offset, max_bytes) / write_file(path, content_base64, mode, create_dirs, overwrite)  # implémenté, plafond 8 Mio
+list_dir(path)                            # pas implémenté
 package_update()
 run_command(cmd, timeout)                 # soumis à la politique de confirmation
 run_shell(command, shell="auto", timeout) # PowerShell (Windows) / Bash (Linux) selon l'OS
 ```
+
+`read_file`/`write_file` ne sont dispatchés qu'aux clients ayant déclaré la
+capacité `file_transfer` à leur `register` (§2, « Négociation de
+capacités ») ; un client antérieur reçoit `unsupported_by_client`. `list_dir`
+reste à l'état de plan : cité ici par cohérence avec la Phase 4 d'origine,
+mais **aucun outil `list_dir` n'existe côté relay ou client** à ce jour.
 
 Le paramètre `shell` accepte `auto` (défaut, choix selon l'OS de la cible),
 `powershell`/`pwsh`, `bash` ou `sh`.

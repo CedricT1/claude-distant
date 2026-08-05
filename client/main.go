@@ -20,7 +20,7 @@ import (
 // at startup. It is a var (not a const) so a release build can stamp it at
 // link time via `-ldflags "-X main.version=..."` (see client/Makefile and
 // docs/PACKAGING.md) without touching this source file.
-var version = "0.1.0"
+var version = "0.2.0"
 
 const (
 	heartbeatInterval = 20 * time.Second
@@ -204,7 +204,7 @@ func runSession(ctx context.Context, cfg config, ws *Workspace) error {
 	defer conn.Close()
 
 	hostname, _ := os.Hostname()
-	if err := conn.WriteJSON(NewRegisterMessage(runtime.GOOS, hostname, version)); err != nil {
+	if err := conn.WriteJSON(NewRegisterMessage(runtime.GOOS, hostname, version, ClientCapabilities)); err != nil {
 		return fmt.Errorf("envoi register: %w", err)
 	}
 

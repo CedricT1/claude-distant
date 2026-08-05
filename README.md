@@ -37,8 +37,9 @@ Accès distant piloté par un harnais IA (Claude) pour l'administration système
 3. **Partage du code** : l'opérateur donne ce code au harness (Claude)
 4. **Connexion du harness** : Claude utilise l'outil MCP `connect_session(code)` pour s'authentifier auprès du relay
 5. **Exécution de commandes** : Claude exécute des tâches via les outils MCP (`system_info`, `run_shell`, etc.) ; le relay les route au client
-6. **Garde-fou local** : pour les commandes destructives, le client demande confirmation localement selon la politique (`auto` / `confirm` / `deny`)
-7. **Fermeture** : le code expire ou le client s'arrête ; session clôturée, aucun résidu sur le PC
+6. **Transfert de fichiers** : `read_file` rapatrie un fichier de la machine distante, `write_file` en dépose un (base64 + SHA-256, 8 MiB max, écriture atomique) — réservés aux clients déclarant la capacité `file_transfer`
+7. **Garde-fou local** : pour les commandes destructives — et *systématiquement* pour `read_file`/`write_file` — le client demande confirmation localement selon la politique (`auto` / `confirm` / `deny`)
+8. **Fermeture** : le code expire ou le client s'arrête ; session clôturée, aucun résidu sur le PC
 
 ## Structure du dépôt
 
@@ -120,8 +121,13 @@ L'opérateur donne le code au harness. Claude exécute :
 connect_session(code="784123678")
 system_info()
 run_shell(command="df -h", shell="auto")
+read_file(path="/etc/os-release")
+write_file(path="/etc/motd", content_base64="…", mode="0644")
 # ... d'autres commandes
 ```
+
+`connect_session` retourne les `capabilities` de la cible : `file_transfer` y
+figure pour les clients ≥ 0.2.0, et conditionne `read_file`/`write_file`.
 
 ## Stack technique
 
@@ -144,25 +150,34 @@ Le harness (Claude) accède au PC distant via les outils MCP **actuellement impl
 | `system_info(session_code)` | Récupérer OS, uptime, RAM, CPU | — |
 | `run_command(session_code, command, timeout?)` | Exécuter une commande (sans shell) | `command:execute` |
 | `run_shell(session_code, command, shell="auto", timeout?)` | Exécuter en PowerShell (Windows) / Bash (Linux) selon l'OS | `command:execute` |
+| `read_file(session_code, path, offset?, max_bytes?)` | Rapatrier un fichier de la machine distante (base64 + SHA-256) | `file:read` |
+| `write_file(session_code, path, content_base64, mode?, create_dirs?, overwrite?)` | Déposer un fichier sur la machine distante (écriture atomique) | `file:write` |
 | `terminate_session(session_code)` | Kill-switch : clôturer une session | `session:terminate` |
 | `issue_client_token(ttl_seconds?)` | Émettre un jeton client `per_session` court | `client:provision` |
 
 Les tâches sysadmin (check disk, processus, services, logs, mises à jour…) se font via `run_shell`/`run_command` (ex. `df -h` / `Get-Volume`, `systemctl` / `Get-Service`). Des helpers de plus haut niveau dédiés (`disk_check`, `service_restart`, etc.) sont prévus au plan mais pas encore exposés.
 
-Tous les outils respectent la **politique de confirmation locale** du client : en mode `confirm`, l'utilisateur doit approuver les actions destructives localement.
+Tous les outils respectent la **politique de confirmation locale** du client : en mode `confirm`, l'utilisateur doit approuver les actions destructives localement — et `read_file`/`write_file` déclenchent *systématiquement* la confirmation, sans classification préalable.
+
+`read_file`/`write_file` exigent en outre que le client déclare la capacité `file_transfer` (clients ≥ 0.2.0). Un client déjà déployé continue de fonctionner à l'identique et reçoit une erreur explicite `unsupported_by_client` sur ces deux outils seulement ; `connect_session` retourne la liste `capabilities` de la cible. Le contenu transféré est plafonné à 8 MiB et rédigé du journal d'audit (voir `docs/PROTOCOL.md` §4).
 
 ### Authentification MCP : `static_bearer` vs `oauth`
 
 Le canal harnais↔relay (`/mcp`) supporte deux modes via `MCP_AUTH_MODE` :
 
 - `static_bearer` (défaut, MVP) : jeton unique `MCP_BEARER_TOKEN`, tous les outils accessibles.
-- `oauth` : Resource Server OAuth 2.1, jetons Bearer JWT scopés (`session:connect`, `command:execute`, `session:terminate`, `client:provision`). Émission via :
+- `oauth` : Resource Server OAuth 2.1, jetons Bearer JWT scopés (`session:connect`, `command:execute`, `session:terminate`, `client:provision`, `file:read`, `file:write`). Émission via :
 
   ```bash
   python -m relay.tokens issue --sub harness-operateur \
     --scopes session:connect,command:execute,session:terminate,client:provision \
     --ttl 3600
   ```
+
+  `file:read`/`file:write` sont volontairement absents de cet exemple : ils
+  doivent être demandés explicitement (`--scopes …,file:read,file:write`). Les
+  jetons émis avant leur introduction ne les portent pas et se voient donc
+  refuser `read_file`/`write_file` (`forbidden_scope`), sans action requise.
 
 - `issue_client_token(ttl_seconds?)` : outil MCP (scope `client:provision`) pour obtenir un jeton client `per_session` court à donner à l'opérateur distant, sans passer par un appel direct à `PerSessionTokenStore`.
 
@@ -198,7 +213,7 @@ Voir [docs/SECURITY.md](docs/SECURITY.md) pour le modèle de menace complet et l
 5. **Phase 4** (✓ primitives) : Exécution cross-platform via `run_shell`/`run_command` (helpers sysadmin dédiés à venir)
 6. **Phase 5** (✓) : Durcissement sécurité (OAuth 2.1 scopé, audit immuable, kill-switch, tokens par-session)
 7. **Phase 6** (✓) : Client portable sans résidu (workspace temp auto-nettoyé, `--remove-on-exit`, build strippé)
-8. **Phase 7** (en cours) : Tests (relay 151 + client 61 verts), observabilité, test d'intégration bout-en-bout relay↔client
+8. **Phase 7** (en cours) : Tests (relay 205 + client 113 verts), observabilité, test d'intégration bout-en-bout relay↔client (dont l'aller-retour `write_file`/`read_file`)
 
 Voir [docs/PLAN.md](docs/PLAN.md) pour les détails.
 
@@ -222,11 +237,11 @@ uvicorn app:app --reload --host 0.0.0.0 --port 8000
 ### Lancer les tests
 
 ```bash
-# Relay (Python) — 151 tests
+# Relay (Python) — 205 tests
 pip install -r relay/requirements.txt
 pytest tests/relay -q
 
-# Client (Go) — 61 tests
+# Client (Go) — 113 tests
 cd client && go test ./...
 ```
 

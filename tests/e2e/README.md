@@ -11,7 +11,7 @@ aucun mock :
    commandes reçues (vrai `exec.Cmd`) et affiche le vrai code de session à
    9 chiffres sur sa sortie standard ;
 3. un **vrai client MCP** (SDK officiel `mcp`, transport Streamable HTTP),
-   qui joue le rôle du harnais et appelle les 6 outils MCP décrits dans
+   qui joue le rôle du harnais et appelle les outils MCP décrits dans
    `docs/PROTOCOL.md`.
 
 Contexte : `claude-distant` est un outil de télémaintenance **consenti et
@@ -58,6 +58,15 @@ d'exécution est bien linux/amd64.
   portant que `session:connect` peut se connecter mais se voit refuser
   `run_shell` (`forbidden_scope`) ; un jeton absent est rejeté en 401 avant
   tout appel d'outil.
+- `test_e2e_file_transfer.py` : transfert de fichiers et négociation de
+  capacités. Aller-retour `write_file` → `read_file` d'un contenu binaire de
+  ~500 Kio (donc plusieurs `file_chunk`), vérifié octet à octet **et** par
+  SHA-256, plus lecture partielle (`offset`/`max_bytes`/`truncated`) et cas
+  d'erreur (`file_not_found`). Second scénario : un faux client « ancien »
+  (WebSocket brut, `register` **sans** `capabilities`) obtient
+  `unsupported_by_client` sans qu'aucune trame `command` inconnue ne lui soit
+  envoyée, et continue de servir `run_shell` exactement comme avant — c'est le
+  test de non-régression de la rétrocompatibilité.
 
 Chaque test attend activement (poll borné par un timeout, jamais de
 `sleep` fixe) : `/healthz` du relay, puis l'apparition du code de session à

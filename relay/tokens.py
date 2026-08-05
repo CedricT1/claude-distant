@@ -19,6 +19,12 @@ Les scopes disponibles correspondent aux outils MCP (voir
   - `command:execute`   → `run_command`, `run_shell`
   - `session:terminate` → `terminate_session`
   - `client:provision`  → `issue_client_token`
+  - `file:read`         → `read_file`
+  - `file:write`        → `write_file`
+
+Les deux scopes de fichiers sont volontairement distincts de `command:execute` :
+un jeton émis avant leur introduction ne les porte pas et se voit donc refuser
+`read_file`/`write_file`, sans qu'aucune action ne soit requise côté opérateur.
 """
 from __future__ import annotations
 
@@ -47,7 +53,8 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help=(
             "Scopes séparés par des virgules, ex. "
-            "session:connect,command:execute,session:terminate,client:provision"
+            "session:connect,command:execute,session:terminate,client:provision,"
+            "file:read,file:write"
         ),
     )
     issue_parser.add_argument(

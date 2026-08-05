@@ -199,6 +199,10 @@ func (e *Executor) Handle(ctx context.Context, cmd CommandMessage) {
 		e.runShellOrCommand(ctx, cmd, false)
 	case "system_info":
 		e.handleSystemInfo(cmd)
+	case "read_file":
+		e.handleReadFile(cmd)
+	case "write_file":
+		e.handleWriteFile(cmd)
 	default:
 		e.sendResult(cmd.RequestID, 1, fmt.Sprintf("outil inconnu: %s", cmd.Tool))
 	}
@@ -217,22 +221,8 @@ func (e *Executor) runShellOrCommand(ctx context.Context, cmd CommandMessage, us
 		return
 	}
 
-	if IsDestructive(p.Command) {
-		switch e.policy {
-		case PolicyAuto:
-			// no gate to apply
-		case PolicyDeny:
-			e.sendApprovalResponse(cmd.RequestID, false)
-			e.sendResult(cmd.RequestID, 126, "refused_by_policy")
-			return
-		case PolicyConfirm:
-			approved := e.resolveApproval(p.Command)
-			e.sendApprovalResponse(cmd.RequestID, approved)
-			if !approved {
-				e.sendResult(cmd.RequestID, 126, "refused_by_user")
-				return
-			}
-		}
+	if IsDestructive(p.Command) && !e.passesGuardRail(cmd.RequestID, p.Command) {
+		return
 	}
 
 	timeout := defaultCommandTimeout
@@ -384,6 +374,83 @@ func (e *Executor) sendResult(requestID string, exitCode int, errMsg string) {
 
 func (e *Executor) sendApprovalResponse(requestID string, approved bool) {
 	_ = e.conn.WriteJSON(NewApprovalResponseMessage(requestID, approved))
+}
+
+// passesGuardRail applies the local policy to one gated operation and reports
+// whether it may proceed. description is both what the operator is shown and
+// the memoization key of the "toujours" answer. When the answer is no, the
+// terminating `approval_response` + `result` pair has already been sent, so
+// the caller only has to return.
+func (e *Executor) passesGuardRail(requestID, description string) bool {
+	switch e.policy {
+	case PolicyDeny:
+		e.sendApprovalResponse(requestID, false)
+		e.sendResult(requestID, 126, "refused_by_policy")
+		return false
+	case PolicyConfirm:
+		approved := e.resolveApproval(description)
+		e.sendApprovalResponse(requestID, approved)
+		if !approved {
+			e.sendResult(requestID, 126, "refused_by_user")
+			return false
+		}
+	}
+	// PolicyAuto: no gate to apply, and no approval_response to emit.
+	return true
+}
+
+// handleReadFile streams a file from this machine to the harness as
+// `file_chunk` messages. Unlike a shell command — gated only when classified
+// destructive — a read is ALWAYS gated: it exfiltrates data off the machine,
+// and the operator is the only one who can judge that.
+func (e *Executor) handleReadFile(cmd CommandMessage) {
+	var p ReadFileParams
+	if len(cmd.Params) > 0 {
+		if err := json.Unmarshal(cmd.Params, &p); err != nil {
+			e.sendResult(cmd.RequestID, 1, errCodeInvalidParams)
+			return
+		}
+	}
+
+	if !e.passesGuardRail(cmd.RequestID, "read_file "+p.Path) {
+		return
+	}
+
+	emit := func(seq int, data string) error {
+		return e.conn.WriteJSON(NewFileChunkMessage(cmd.RequestID, seq, data))
+	}
+	meta, err := readFileTransfer(p, emit)
+	if err != nil {
+		e.sendResult(cmd.RequestID, 1, fileErrorCode(err))
+		return
+	}
+	_ = e.conn.WriteJSON(NewResultMessageWithMeta(cmd.RequestID, 0, "", meta))
+}
+
+// handleWriteFile installs a file sent by the harness onto this machine. It
+// is always gated too, being a modification of the remote filesystem; the
+// prompt states the payload size so the operator can tell a config tweak
+// from a multi-megabyte drop.
+func (e *Executor) handleWriteFile(cmd CommandMessage) {
+	var p WriteFileParams
+	if len(cmd.Params) > 0 {
+		if err := json.Unmarshal(cmd.Params, &p); err != nil {
+			e.sendResult(cmd.RequestID, 1, errCodeInvalidParams)
+			return
+		}
+	}
+
+	description := fmt.Sprintf("write_file %s (%d octets)", p.Path, base64DecodedLen(p.ContentBase64))
+	if !e.passesGuardRail(cmd.RequestID, description) {
+		return
+	}
+
+	meta, err := writeFileTransfer(p)
+	if err != nil {
+		e.sendResult(cmd.RequestID, 1, fileErrorCode(err))
+		return
+	}
+	_ = e.conn.WriteJSON(NewResultMessageWithMeta(cmd.RequestID, 0, "", meta))
 }
 
 // resolveApproval decides whether a destructive command may run under
