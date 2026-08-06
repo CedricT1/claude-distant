@@ -40,7 +40,11 @@
 BINARY  := claude-distant-client
 DIST    := dist
 
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# Le `v` initial des tags sémantiques (`v0.3.0`) est retiré : `main.go` affiche
+# déjà « client v%s » et la variable `version` est envoyée telle quelle au relay
+# dans `register`. Sans ce nettoyage, un build tagué s'annonce « vv0.3.0 » et le
+# relay journalise une version incohérente avec le défaut codé en dur ("0.3.0").
+VERSION ?= $(patsubst v%,%,$(shell git describe --tags --always --dirty 2>/dev/null || echo dev))
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
 # --- Personnalisation à la compilation (binaire à un seul argument zéro) ---
