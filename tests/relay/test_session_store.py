@@ -1,6 +1,8 @@
 """Tests unitaires pour relay.session_store : génération de code et TTL."""
 import re
 
+import pytest
+
 from relay.session_store import InMemorySessionStore, SessionRecord, generate_session_code
 
 
@@ -36,6 +38,84 @@ class TestInMemorySessionStoreCreate:
         )
         assert second == "999999999"
         assert second != first
+
+
+class TestInMemorySessionStoreDesiredCode:
+    """Code de session souhaité (adresse stable, cf. docs/PROTOCOL.md) : honoré
+    quand il est syntaxiquement valide et libre, sinon repli sur le tirage
+    aléatoire existant. Premier arrivé, premier servi — voir la docstring de
+    `InMemorySessionStore.create` pour le choix (assumé) de ne jamais évincer
+    une connexion déjà en place sur ce code.
+    """
+
+    async def test_desired_code_is_honored_when_free(self):
+        store = InMemorySessionStore()
+        code = await store.create(
+            connection="conn-1",
+            os="linux",
+            hostname="h1",
+            version="1.0",
+            ttl_seconds=30,
+            desired_code="784123678",
+        )
+        assert code == "784123678"
+
+    async def test_desired_code_falls_back_to_random_when_already_taken(self):
+        store = InMemorySessionStore()
+        first = await store.create(
+            connection="conn-1",
+            os="linux",
+            hostname="h1",
+            version="1.0",
+            ttl_seconds=30,
+            desired_code="111111111",
+        )
+        assert first == "111111111"
+        # Générateur de repli forcé : sans ça on ne pourrait vérifier que
+        # `second != desired_code`, ce qui resterait vrai même en cas de bug
+        # (ex. collision fortuite avec le tirage aléatoire réel).
+        store._code_generator = lambda: "222222222"
+        second = await store.create(
+            connection="conn-2",
+            os="linux",
+            hostname="h2",
+            version="1.0",
+            ttl_seconds=30,
+            desired_code="111111111",
+        )
+        assert second == "222222222"
+
+    @pytest.mark.parametrize(
+        "desired_code",
+        [
+            "12345",  # trop court
+            "1234567890",  # trop long
+            "12345678a",  # non numérique
+            123456789,  # pas une str
+            None,  # explicitement absent
+        ],
+    )
+    async def test_desired_code_falls_back_when_malformed(self, desired_code):
+        store = InMemorySessionStore()
+        store._code_generator = lambda: "333333333"
+        code = await store.create(
+            connection="conn-1",
+            os="linux",
+            hostname="h1",
+            version="1.0",
+            ttl_seconds=30,
+            desired_code=desired_code,
+        )
+        assert code == "333333333"
+
+    async def test_create_without_desired_code_argument_is_unaffected(self):
+        # Appelant historique : le paramètre n'existe pas dans son vocabulaire,
+        # le comportement (génération aléatoire) doit rester identique.
+        store = InMemorySessionStore()
+        code = await store.create(
+            connection="conn-1", os="linux", hostname="h1", version="1.0", ttl_seconds=30
+        )
+        assert re.fullmatch(r"\d{9}", code)
 
 
 class TestInMemorySessionStoreCapabilities:

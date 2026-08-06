@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Binaires du client Go (artefacts de build, jamais versionnés)
+client/client
+client/claude-distant-client
+client/dist/
+*.exe

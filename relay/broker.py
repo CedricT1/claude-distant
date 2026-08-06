@@ -110,12 +110,19 @@ class Broker:
         hostname: str,
         version: str,
         capabilities: Sequence[str] | None = None,
+        desired_code: str | None = None,
     ) -> str:
         """Enregistre une connexion client fraîchement `register`-ée et retourne son code.
 
         `capabilities` est optionnel et en dernière position : un client déjà
         déployé n'en déclare aucune et se voit attribuer `()`, ce qui suffit au
         relay pour ne jamais lui envoyer d'outil qu'il ne connaît pas.
+
+        `desired_code` (optionnel, en toute dernière position pour la même
+        raison de compatibilité) est relayé tel quel au store : c'est lui qui
+        décide de l'honorer ou de retomber sur le tirage aléatoire (validité
+        syntaxique, disponibilité — voir `SessionStore.create`). Le broker ne
+        fait ici aucun arbitrage.
         """
         return await self._session_store.create(
             connection=connection,
@@ -124,6 +131,7 @@ class Broker:
             version=version,
             ttl_seconds=self._default_ttl_seconds,
             capabilities=capabilities,
+            desired_code=desired_code,
         )
 
     async def heartbeat(self, session_code: str) -> bool:

@@ -75,6 +75,73 @@ ce canal, ou compromission du poste opérateur du harnais — ce sont les
 frontières de confiance du système, pas des failles qu'un durcissement du
 relay peut combler.
 
+## 1ter. Personnalisation à la compilation, adresse stable, GUI
+
+Trois entrées supplémentaires au modèle de menace, introduites par la
+personnalisation à la compilation, l'adresse stable et le client graphique
+(Fyne). À prendre au sérieux : aucune n'est un bug, toutes les trois sont des
+compromis assumés dont l'utilisateur/déployeur doit connaître le prix.
+
+- **(a) Le binaire distribué EST lui-même un secret.** Un `RELAY_URL`, un
+  `CLIENT_TOKEN` ou un `IDENTITY_SECRET` compilés dans un binaire personnalisé
+  (`client/Makefile`, injectés via `-ldflags -X` dans les variables décrites
+  par `client/buildconfig.go`) ne sont ni chiffrés ni obfusqués : un simple
+  `strings claude-distant-client-linux-amd64 | grep wss://` (ou n'importe quel
+  visualiseur hex/désassembleur) les récupère en clair, aussi facilement que
+  s'ils étaient dans un fichier texte. `-ldflags -X` patche une valeur
+  initiale de variable dans la section données du binaire ; ce n'est pas un
+  mécanisme de secret. Conséquence pratique et non négociable : **le binaire
+  personnalisé lui-même doit être manipulé, stocké et distribué avec
+  exactement le même soin qu'un `docker/.env`** contenant ces mêmes valeurs en
+  clair (§4) — jamais commité dans un dépôt, jamais posté sur un canal de
+  distribution non maîtrisé (chat public, forge publique). Un jeton
+  compromis via cette voie se révoque comme n'importe quel jeton compromis
+  (rotation, §4), mais le fait qu'il ait fuité *via le binaire* est facile à
+  manquer si on ne pense « secret » que pour les fichiers de configuration.
+
+- **(b) L'adresse stable rend le code de session prédictible et rejouable
+  dans le temps, ce qui affaiblit une garantie déjà documentée.**
+  `docs/PROTOCOL.md` §3 énonçait jusqu'ici, sans condition, que les codes de
+  session sont « régénérés à chaque connexion client » — c'est précisément
+  cette ligne que l'adresse stable affaiblit. Avec `desired_code`
+  (`docs/PROTOCOL.md` §1), `DeriveSessionCode` (`client/identity.go`)
+  recalcule volontairement le **même** code à chaque reconnexion tant que la
+  machine et le secret ne changent pas : la régénération à chaque connexion
+  n'est plus vraie par défaut, elle devient une option (`--ephemeral-code`).
+  Un code intercepté une fois (capture d'écran, regard par-dessus l'épaule,
+  journal applicatif tiers) reste donc valide pour cibler la même machine
+  indéfiniment d'une session à l'autre — le TTL court ne protège plus que la
+  fenêtre d'une session *active*, plus la prévisibilité de l'adresse
+  elle-même. Mitigations disponibles, à la charge du déploiement : compiler
+  un `IDENTITY_SECRET` propre au déploiement (`client/Makefile`) rend le code
+  non dérivable sans connaître ce secret ; `--ephemeral-code` /
+  `CLAUDE_DISTANT_EPHEMERAL_CODE` désactive entièrement la fonctionnalité et
+  restaure le tirage aléatoire d'avant, si la prévisibilité est inacceptable
+  pour un déploiement donné. Sans `IDENTITY_SECRET` dédié, le sel par défaut
+  du projet (`defaultIdentitySalt`, public dans le code source) rend le code
+  dérivable par quiconque connaît le `MachineID` de la cible — lui-même pas un
+  secret fort (`/etc/machine-id` est lisible par tout utilisateur local par
+  construction sur Linux).
+
+- **(c) Le mode automatique de la GUI désactive le garde-fou local, y
+  compris pour les opérations fichiers, sur décision de l'utilisateur.**
+  L'interrupteur « Mode automatique » de la fenêtre Fyne (`client/gui.go`)
+  bascule le `PolicyController` de `confirm` vers `auto` en cours de session :
+  tant qu'il reste actif, plus aucune commande shell (`run_shell`/
+  `run_command`) ni opération fichier (`read_file`/`write_file`) n'est
+  soumise à confirmation locale — la même politique que `--policy auto` en
+  ligne de commande, mais activable/désactivable à la volée. C'est une
+  décision prise par **l'utilisateur du PC distant lui-même**, pas par le
+  harnais ni par l'opérateur distant, cohérente avec le modèle de consentement
+  du projet (§1) — un avertissement visible et permanent reste affiché dans
+  la fenêtre tant que le mode est actif, pour qu'elle ne soit jamais prise par
+  inadvertance. Reste que, pour toute sa durée d'activation, elle supprime la
+  dernière ligne de défense locale contre une commande destructive ou un
+  transfert de fichier (lecture qui exfiltre, écriture qui altère) envoyé par
+  un harnais compromis ou mal aiguillé — exactement le même compromis que
+  `--policy auto` en console, rendu plus accessible et donc plus facile à
+  activer sans y réfléchir.
+
 ## 2. TLS strict (terminaison externe)
 
 Le relay (`uvicorn`) écoute en **HTTP interne** uniquement ; il ne termine

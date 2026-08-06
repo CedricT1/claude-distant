@@ -49,27 +49,36 @@ type Envelope struct {
 // --- Client -> Relay messages ---
 
 // RegisterMessage announces this client to the relay right after connecting.
-// Capabilities is omitempty on purpose: a client with nothing to declare must
-// serialize exactly as before the capability negotiation existed, so an older
-// relay sees no unknown field at all.
+// Capabilities and DesiredCode are both omitempty on purpose, and for the
+// same reason: a client with nothing to declare/request must serialize
+// exactly as before that field existed, so an older relay sees no unknown
+// key at all (docs/PROTOCOL.md).
 type RegisterMessage struct {
 	Type         MessageType `json:"type"`
 	OS           string      `json:"os"`
 	Hostname     string      `json:"hostname"`
 	Version      string      `json:"version"`
 	Capabilities []string    `json:"capabilities,omitempty"`
+	// DesiredCode is the 9-digit stable session code (client/identity.go's
+	// DeriveSessionCode) this client would like re-assigned. Empty means
+	// "no preference" — either --ephemeral-code was requested, or no
+	// MachineID could be read — and the relay falls back to its existing
+	// random assignment, exactly like a pre-stable-address client.
+	DesiredCode string `json:"desired_code,omitempty"`
 }
 
 // NewRegisterMessage builds a `register` message. osName must be "linux" or
 // "windows" per the protocol (typically runtime.GOOS). Pass nil capabilities
-// to advertise none.
-func NewRegisterMessage(osName, hostname, version string, capabilities []string) RegisterMessage {
+// to advertise none, and an empty desiredCode to request none (a random
+// code, as before the stable-address feature existed).
+func NewRegisterMessage(osName, hostname, version string, capabilities []string, desiredCode string) RegisterMessage {
 	return RegisterMessage{
 		Type:         TypeRegister,
 		OS:           osName,
 		Hostname:     hostname,
 		Version:      version,
 		Capabilities: capabilities,
+		DesiredCode:  desiredCode,
 	}
 }
 

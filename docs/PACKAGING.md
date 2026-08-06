@@ -78,7 +78,7 @@ lui fait exécuter. Comme les autres outils, les opérations `read_file`/
 confirmation locale ; en `deny`, elles sont toujours refusées.
 
 Ce qui reste **hors du contrôle du client**, par nature, et n'est donc pas
-« nettoyé » — à documenter côté utilisateur final (§4) :
+« nettoyé » — à documenter côté utilisateur final (§6) :
 - L'historique shell (le lancement de la commande peut apparaître dans
   `~/.bash_history` / `PSReadLine`) si l'utilisateur tape la commande
   manuellement plutôt que de double-cliquer sur le binaire.
@@ -87,7 +87,66 @@ Ce qui reste **hors du contrôle du client**, par nature, et n'est donc pas
   lui-même n'écrit rien là, mais l'OS peut avoir sa propre télémétrie de
   processus indépendamment de l'application.
 
-## 2. Build — binaire unique portable
+## 2. Deux variantes de binaire : console et GUI
+
+Depuis la même base de code, `client/Makefile` produit deux familles de
+binaires bien distinctes :
+
+| Variante | Build | Cible | Taille indicative (strippé) |
+|---|---|---|---|
+| **console** | `CGO_ENABLED=0`, statique, `make dist` | serveurs, y compris **sans affichage** | ~5,5 Mo |
+| **GUI** | `-tags gui`, CGO + X11 (Linux)/mingw (Windows), `make dist-gui` | postes de bureau Windows / Ubuntu | ~24 Mo (Linux et Windows) |
+
+Tailles mesurées sur le build `v0.3.0` : la variante GUI pèse environ **quatre
+fois** la console, Fyne embarquant son propre moteur de rendu et ses polices.
+C'est le prix de la fenêtre, et une raison de plus de ne pas l'imposer aux
+déploiements serveur.
+
+**Pourquoi deux binaires, et pas un seul avec la GUI en option activable au
+runtime :** Fyne (le framework graphique utilisé, `client/gui.go`, tag de
+build `gui`) lie **dynamiquement** la bibliothèque X11 sur Linux (et
+équivalent GDI/Direct3D sur Windows) — un binaire compilé avec ce lien ne
+démarre tout simplement pas sur une machine sans serveur d'affichage
+(headless, la cible principale de ce projet : un serveur administré à
+distance). Séparer les deux au build (tag `gui` + `CGO_ENABLED`) plutôt que de
+détecter l'absence d'affichage au runtime évite ce piège : le livrable par
+défaut (console, `make dist`) reste utilisable absolument partout, et la GUI
+(`make dist-gui`) est un livrable additionnel réservé aux postes de bureau où
+un opérateur humain est présent devant l'écran. C'est aussi pour cette raison
+que la variante GUI n'est ni statique ni `CGO_ENABLED=0` : Fyne l'exige.
+
+### Prérequis de build — variante GUI uniquement
+
+La variante console (§3) ne requiert que Go. La variante GUI, elle, a besoin
+d'une toolchain C et des bibliothèques de développement X11/OpenGL sur la
+machine qui compile :
+
+```sh
+# Debian/Ubuntu — cible Linux (compilation native, CGO_ENABLED=1)
+sudo apt install gcc libgl1-mesa-dev xorg-dev libxxf86vm-dev
+
+# Debian/Ubuntu — cible Windows depuis Linux (cross-compilation mingw)
+sudo apt install gcc-mingw-w64-x86-64
+```
+
+`libxxf86vm-dev` mérite d'être cité explicitement : c'est le seul paquet qui
+a manqué lors de la mise en place de la variante GUI sur la machine de
+développement de ce projet (les autres paquets X11/OpenGL usuels étaient déjà
+présents) — un oubli facile puisque `xorg-dev` seul ne le tire pas
+automatiquement sur toutes les distributions. `gcc-mingw-w64-x86-64` fournit
+`x86_64-w64-mingw32-gcc`, le compilateur C utilisé par `make dist-gui` (via
+`CC=x86_64-w64-mingw32-gcc`) pour produire l'exécutable Windows depuis Linux.
+
+### Binaires non versionnés dans git
+
+`client/client` (le binaire de build local, `make`/`make build`) a été retiré
+du suivi git, et le `.gitignore` racine couvre désormais `client/client`,
+`client/dist/` (sortie de `make dist`/`make dist-gui`) et `*.exe` : aucun des
+binaires produits par ce document, console ou GUI, n'est destiné à être
+commité. Seuls les checksums (`dist/SHA256SUMS`, §5) ont vocation à
+accompagner une release dans un canal de distribution externe au dépôt.
+
+## 3. Build — variante console (binaire unique portable)
 
 Go 1.22+ (le dépôt est développé/testé avec Go 1.24). Aucune dépendance
 CGO. Depuis `client/` :
@@ -124,8 +183,13 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
   binaires identiques (build reproductible).
 
 Plateformes cibles (Phase 6) : `linux/amd64`, `linux/arm64`,
-`windows/amd64`. Sorties dans `client/dist/` (déjà couvert par l'entrée
-générique `dist/` du `.gitignore` racine — non versionné).
+`windows/amd64`. Sorties dans `client/dist/` (couvert par `.gitignore`
+racine — non versionné, voir §2).
+
+`RELAY_URL`/`CLIENT_TOKEN`/`IDENTITY_SECRET` (vides par défaut) personnalisent
+ce même build pour produire un binaire à lancer sans argument ; voir
+`client/Makefile` (commentaires en tête de fichier) et `docs/PROTOCOL.md`
+pour la résolution flag > variable d'environnement > valeur compilée.
 
 ### Reproductibilité
 
@@ -140,18 +204,67 @@ Tant que la même version de Go, le même module (`go.sum` inchangé) et les
 mêmes `VERSION`/`COMMIT` sont utilisés, le binaire produit est identique
 octet pour octet.
 
-## 3. Signature / intégrité de la distribution
+## 4. Build — variante GUI
+
+Prérequis : §2 ci-dessus (paquets X11/OpenGL côté Linux,
+`gcc-mingw-w64-x86-64` pour cross-compiler la cible Windows). Depuis
+`client/` :
+
+```sh
+make dist-gui    # linux/amd64 (CGO natif) + windows/amd64 (mingw) -> dist/
+```
+
+Équivalent manuel, cible par cible :
+
+```sh
+# Linux amd64 — compilation native, CGO requis par Fyne
+CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -tags gui \
+  -trimpath -ldflags "-s -w -buildid= -X main.version=1.0.0+abc1234" \
+  -o dist/claude-distant-client-gui-linux-amd64 .
+
+# Windows amd64 — cross-compilation depuis Linux via mingw
+CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
+  go build -tags gui -trimpath \
+  -ldflags "-s -w -buildid= -X main.version=1.0.0+abc1234 -H windowsgui" \
+  -o dist/claude-distant-client-gui-windows-amd64.exe .
+```
+
+- `-tags gui` : bascule `client/gui.go` (implémentation Fyne) au lieu de
+  `client/gui_stub.go` (point d'entrée console, compilé par défaut) — voir
+  `docs/PROTOCOL.md`/le code pour le détail de la fenêtre.
+- `CGO_ENABLED=1` : contrairement à la variante console, non négociable ici —
+  Fyne s'appuie sur des bibliothèques graphiques natives (X11 côté Linux,
+  GDI/Direct3D côté Windows) accessibles uniquement via CGO.
+- `-H windowsgui` (**Windows uniquement**) : indique au linker Go de produire
+  un exécutable de sous-système `GUI` plutôt que `console` — sans ce
+  drapeau, une fenêtre de console noire s'ouvrirait derrière la fenêtre Fyne
+  et resterait ouverte tant que le processus tourne, ce qui n'a pas de sens
+  pour un livrable destiné à un utilisateur de bureau. Absent sur la cible
+  Linux (spécifique au format d'exécutable PE de Windows).
+- `-trimpath`/`-buildid=`/`-s -w`/`-X main.version=...` : mêmes drapeaux et
+  même intention que pour la variante console (§3) — mais la reproductibilité
+  binaire stricte n'est **pas** garantie ici : la toolchain C système (gcc
+  natif ou `x86_64-w64-mingw32-gcc`) contribue elle aussi au binaire final, et
+  sa version n'est pas figée par ce Makefile comme l'est celle de Go.
+
+Sorties : `dist/claude-distant-client-gui-linux-amd64` et
+`dist/claude-distant-client-gui-windows-amd64.exe` (préfixe `-gui-` qui les
+distingue des binaires console dans le même dossier `dist/`, et qui reste
+couvert par `checksums`, §5).
+
+## 5. Signature / intégrité de la distribution
 
 Cet environnement de développement ne dispose d'aucun certificat de
 signature de code ni de clé GPG — la signature réelle n'est donc **pas**
 automatisée ici. Procédure documentée pour un pipeline de release réel :
 
-### 3.1 Checksums (minimum, toujours applicable)
+### 5.1 Checksums (minimum, toujours applicable)
 
 ```sh
 cd client
-make dist
-make checksums          # écrit dist/SHA256SUMS
+make dist              # binaires console
+make dist-gui           # + binaires GUI, si distribués (§4)
+make checksums          # écrit dist/SHA256SUMS -- couvre les deux familles
 cat dist/SHA256SUMS
 ```
 
@@ -166,7 +279,7 @@ Get-FileHash .\claude-distant-client-windows-amd64.exe -Algorithm SHA256
 # comparer la sortie à la ligne correspondante de SHA256SUMS
 ```
 
-### 3.2 Windows — Authenticode (`signtool`)
+### 5.2 Windows — Authenticode (`signtool`)
 
 Sur une machine de release disposant d'un certificat de signature de code
 (EV ou OV, émis par une autorité reconnue) :
@@ -184,10 +297,11 @@ signtool verify /pa dist\claude-distant-client-windows-amd64.exe
   après expiration du certificat).
 - Un exécutable non signé déclenche des avertissements SmartScreen/Defender
   plus agressifs sur les postes Windows récents ; signer réduit ce
-  frottement mais ne dispense pas des checksums (§3.1) pour la vérification
-  d'intégrité indépendante du fournisseur du certificat.
+  frottement mais ne dispense pas des checksums (§5.1) pour la vérification
+  d'intégrité indépendante du fournisseur du certificat. S'applique aux deux
+  variantes (console et GUI, `*-windows-amd64.exe`/`*-gui-windows-amd64.exe`).
 
-### 3.3 Linux — signature détachée GPG
+### 5.3 Linux — signature détachée GPG
 
 ```sh
 # Une fois, côté mainteneur : générer/posséder une clé de signature dédiée
@@ -202,11 +316,13 @@ gpg --armor --detach-sign dist/claude-distant-client-linux-arm64
 gpg --verify claude-distant-client-linux-amd64.asc claude-distant-client-linux-amd64
 ```
 
-### 3.4 Publication recommandée par release
+### 5.4 Publication recommandée par release
 
-Pour chaque binaire produit par `make dist` :
-1. `dist/claude-distant-client-<os>-<arch>[.exe]` (le binaire)
-2. `dist/SHA256SUMS` (checksums de tous les binaires de la release)
+Pour chaque binaire produit par `make dist`/`make dist-gui` :
+1. `dist/claude-distant-client-<os>-<arch>[.exe]` (console) et/ou
+   `dist/claude-distant-client-gui-<os>-<arch>[.exe]` (GUI) — le binaire
+2. `dist/SHA256SUMS` (checksums de tous les binaires de la release, console
+   et GUI confondus, §5.1)
 3. `.asc` détaché GPG (Linux) — et binaire signé Authenticode (Windows,
    remplace directement le binaire non signé, `signtool` modifie le
    fichier en place)
@@ -214,25 +330,35 @@ Pour chaque binaire produit par `make dist` :
    lui-même, pour que la vérification de checksums ne repose pas sur un
    canal de téléchargement non authentifié.
 
-## 4. Mode d'emploi utilisateur final
+## 6. Mode d'emploi utilisateur final
 
-1. **Télécharger** le binaire correspondant à sa machine
-   (`claude-distant-client-windows-amd64.exe` ou
-   `claude-distant-client-linux-amd64`/`-linux-arm64`) depuis le canal de
-   distribution fourni par l'opérateur, dans n'importe quel dossier
-   (Bureau, Téléchargements, clé USB...) — aucune installation.
+1. **Choisir puis télécharger** le binaire correspondant à sa machine et à
+   son usage, depuis le canal de distribution fourni par l'opérateur, dans
+   n'importe quel dossier (Bureau, Téléchargements, clé USB...) — aucune
+   installation :
+   - **console** (`claude-distant-client-windows-amd64.exe`,
+     `-linux-amd64`, `-linux-arm64`) : le choix par défaut, fonctionne
+     partout, y compris sur un serveur sans écran.
+   - **GUI** (`claude-distant-client-gui-windows-amd64.exe`,
+     `-gui-linux-amd64`) : pour un poste de bureau, quand un opérateur
+     humain préfère une fenêtre (code de session en gros caractères,
+     interrupteur mode automatique, journal d'activité en direct) à un
+     terminal — voir `client/README.md`.
 2. **Vérifier l'intégrité** (recommandé) : comparer le SHA-256 du fichier
-   téléchargé à celui publié dans `SHA256SUMS` (§3.1), et/ou vérifier la
+   téléchargé à celui publié dans `SHA256SUMS` (§5.1), et/ou vérifier la
    signature Authenticode (clic droit → Propriétés → Signatures
-   numériques, sous Windows) ou GPG (§3.3, sous Linux).
+   numériques, sous Windows) ou GPG (§5.3, sous Linux).
 3. **Lancer** le binaire :
    - Windows : double-clic, ou depuis un terminal :
      `.\claude-distant-client-windows-amd64.exe --url wss://... --token ...`
    - Linux : `chmod +x` puis
      `./claude-distant-client-linux-amd64 --url wss://... --token ...`
    (`--url`/`--token` peuvent aussi venir de `CLAUDE_DISTANT_URL`/
-   `CLAUDE_DISTANT_TOKEN`, fournis par l'opérateur — voir
-   `client/README.md`.)
+   `CLAUDE_DISTANT_TOKEN`, fournis par l'opérateur, ou avoir été compilés
+   dans le binaire via `RELAY_URL`/`CLIENT_TOKEN` (`client/Makefile`) —
+   auquel cas un double-clic sans le moindre argument suffit. Voir
+   `client/README.md`.) La variante GUI lance directement la fenêtre ; la
+   variante console reste dans le terminal qui l'a lancée.
 4. **Communiquer le code de session** à 9 chiffres affiché à l'écran
    (`784 123 678`) à l'opérateur (le harnais Claude), qui l'utilise côté
    relay pour cibler cette machine.

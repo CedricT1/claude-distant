@@ -83,6 +83,25 @@ def _normalize_capabilities(raw: Any) -> tuple[str, ...]:
     return tuple(item for item in raw if isinstance(item, str))
 
 
+def _normalize_desired_code(raw: Any) -> str | None:
+    """Normalise le champ optionnel `desired_code` d'un `register` client.
+
+    Le champ vient du réseau et sert à réclamer un code de session stable
+    (cf. `docs/PROTOCOL.md`) : on n'accepte donc qu'une vraie `str` d'exactement
+    9 chiffres décimaux. Tout le reste (absent, mauvaise longueur, non
+    numérique, type inattendu — un ancien client ne l'envoie simplement pas)
+    retombe sur `None`, la valeur sûre qui fait retomber `SessionStore.create`
+    sur le tirage aléatoire habituel. La validation de la *disponibilité* du
+    code (est-il déjà pris ?) n'a pas sa place ici : c'est le store, seul
+    détenteur de l'état, qui en décide.
+    """
+    if not isinstance(raw, str):
+        return None
+    if len(raw) != 9 or not raw.isdigit():
+        return None
+    return raw
+
+
 class _WebSocketConnection:
     """Adapte la WebSocket FastAPI réelle à l'interface `ConnectionLike` du broker."""
 
@@ -211,6 +230,7 @@ def create_app(
                         hostname=message.get("hostname", ""),
                         version=message.get("version", ""),
                         capabilities=_normalize_capabilities(message.get("capabilities")),
+                        desired_code=_normalize_desired_code(message.get("desired_code")),
                     )
                     await websocket.send_json({"type": "registered", "session_code": session_code})
                 elif msg_type == "heartbeat":

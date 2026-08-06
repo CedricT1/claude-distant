@@ -20,7 +20,7 @@ import (
 // at startup. It is a var (not a const) so a release build can stamp it at
 // link time via `-ldflags "-X main.version=..."` (see client/Makefile and
 // docs/PACKAGING.md) without touching this source file.
-var version = "0.2.0"
+var version = "0.3.0"
 
 const (
 	heartbeatInterval = 20 * time.Second
@@ -29,15 +29,37 @@ const (
 )
 
 // config holds the fully-resolved client configuration, whatever the source
-// (flag or environment variable) of each value. token is a *SecretBytes
-// (not a plain string) so it can be zeroized in memory at shutdown — part
-// of the residue-free runtime (docs/PLAN.md Phase 6).
+// (flag, environment variable, or compiled-in buildDefaults) of each value.
+// token is a *SecretBytes (not a plain string) so it can be zeroized in
+// memory at shutdown — part of the residue-free runtime (docs/PLAN.md
+// Phase 6).
 type config struct {
 	url          string
 	token        *SecretBytes
 	policy       Policy
 	insecure     bool
 	removeOnExit bool
+
+	// identitySecret and ephemeralCode drive the stable-address feature
+	// (client/identity.go, docs/PROTOCOL.md). identitySecret is the
+	// resolved IDENTITY_SECRET (compiled default only — see buildDefaults;
+	// there is deliberately no --identity-secret flag/env, since accepting
+	// it from the command line would defeat the point of baking it into a
+	// customized binary). ephemeralCode, when true, opts back into the
+	// pre-existing random-code-per-connection behavior.
+	identitySecret string
+	ephemeralCode  bool
+}
+
+// buildDefaults holds the compiled-in fallback values a customized build
+// stamps into buildconfig.go's package-level vars. Threading it through as
+// a parameter (rather than parseConfigWithDefaults reading the package
+// vars itself) is what keeps the three-level resolution logic a pure,
+// unit-testable function of its inputs.
+type buildDefaults struct {
+	url            string
+	token          string
+	identitySecret string
 }
 
 func main() {
@@ -63,9 +85,12 @@ func main() {
 	fmt.Println("Connexion au relay...")
 
 	// RunGuarded guarantees the cleanup below runs exactly once no matter
-	// how runForever exits — clean return, error return, or panic — so
-	// the workspace is always removed and the token always zeroized, and
-	// (opt-in) the binary itself is always deleted.
+	// how runUI exits — clean return, error return, or panic — so the
+	// workspace is always removed and the token always zeroized, and
+	// (opt-in) the binary itself is always deleted. runUI is the
+	// build-tag-selected entry point (gui_stub.go's console pass-through by
+	// default, gui.go's Fyne window under `-tags gui`); this file
+	// deliberately knows nothing about Fyne or which tag is active.
 	var runErr error
 	RunGuarded(func() {
 		ws.Cleanup()
@@ -74,7 +99,7 @@ func main() {
 			removeOwnBinary()
 		}
 	}, func() {
-		runErr = runForever(ctx, cfg, ws)
+		runErr = runUI(ctx, cfg, ws)
 	})
 
 	if runErr != nil && runErr != context.Canceled {
@@ -101,11 +126,34 @@ func removeOwnBinary() {
 	fmt.Println("Nettoyage: binaire supprimé.")
 }
 
-// parseConfig resolves flags and environment variables into a config, with
-// flags taking precedence over the matching CLAUDE_DISTANT_* env var. It is
-// a pure function of (args, getenv) so it can be unit tested without
-// touching the real process environment.
+// parseConfig resolves flags and environment variables into a config, using
+// this package's own compiled-in buildDefaults (buildconfig.go) as the
+// third and last resolution level. This is the entry point main() calls;
+// its behavior for a generic (non-customized) build — buildRelayURL /
+// buildClientToken / buildIdentitySecret all "" — is byte-for-byte
+// unchanged from before compiled defaults existed, which is the
+// non-regression pinned by TestParseConfig_GenericBuildStillRequiresURLAndToken.
 func parseConfig(args []string, getenv func(string) string) (config, error) {
+	return parseConfigWithDefaults(args, getenv, buildDefaults{
+		url:            buildRelayURL,
+		token:          buildClientToken,
+		identitySecret: buildIdentitySecret,
+	})
+}
+
+// parseConfigWithDefaults is parseConfig's testable core. Each setting is
+// resolved with the first non-empty source winning, in this order:
+//  1. the command-line flag (--url, --token)
+//  2. the CLAUDE_DISTANT_* environment variable
+//  3. defaults, compiled into the binary at link time
+//
+// The "--url (ou CLAUDE_DISTANT_URL) est requis" family of errors is only
+// raised once all three sources come up empty, so a customized build (all
+// three defaults set) launches with zero arguments, while a generic build
+// (defaults all "") behaves exactly as it always has. It is a pure function
+// of (args, getenv, defaults) so it can be unit tested without touching the
+// real process environment or this package's compiled-in vars.
+func parseConfigWithDefaults(args []string, getenv func(string) string, defaults buildDefaults) (config, error) {
 	fs := flag.NewFlagSet("claude-distant-client", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
@@ -114,6 +162,7 @@ func parseConfig(args []string, getenv func(string) string) (config, error) {
 	policyFlag := fs.String("policy", "", "Politique de garde-fou : auto|confirm|deny")
 	insecureFlag := fs.Bool("insecure-skip-verify", false, "Désactive la vérification TLS (développement uniquement)")
 	removeOnExitFlag := fs.Bool("remove-on-exit", false, "Supprime le binaire lui-même à l'arrêt propre (best-effort, désactivé par défaut)")
+	ephemeralCodeFlag := fs.Bool("ephemeral-code", false, "Revient au code de session aléatoire (au lieu de l'adresse stable dérivée de la machine)")
 
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
@@ -123,6 +172,9 @@ func parseConfig(args []string, getenv func(string) string) (config, error) {
 	if url == "" {
 		url = getenv("CLAUDE_DISTANT_URL")
 	}
+	if url == "" {
+		url = defaults.url
+	}
 	if strings.TrimSpace(url) == "" {
 		return config{}, fmt.Errorf("--url (ou CLAUDE_DISTANT_URL) est requis")
 	}
@@ -130,6 +182,9 @@ func parseConfig(args []string, getenv func(string) string) (config, error) {
 	token := *tokenFlag
 	if token == "" {
 		token = getenv("CLAUDE_DISTANT_TOKEN")
+	}
+	if token == "" {
+		token = defaults.token
 	}
 	if strings.TrimSpace(token) == "" {
 		return config{}, fmt.Errorf("--token (ou CLAUDE_DISTANT_TOKEN) est requis")
@@ -148,12 +203,25 @@ func parseConfig(args []string, getenv func(string) string) (config, error) {
 	}
 
 	return config{
-		url:          url,
-		token:        NewSecret(token),
-		policy:       policy,
-		insecure:     *insecureFlag,
-		removeOnExit: removeOnExitEnabled(*removeOnExitFlag, getenv),
+		url:            url,
+		token:          NewSecret(token),
+		policy:         policy,
+		insecure:       *insecureFlag,
+		removeOnExit:   removeOnExitEnabled(*removeOnExitFlag, getenv),
+		identitySecret: defaults.identitySecret,
+		ephemeralCode:  ephemeralCodeEnabled(*ephemeralCodeFlag, getenv),
 	}, nil
+}
+
+// ephemeralCodeEnabled resolves the --ephemeral-code flag / the
+// CLAUDE_DISTANT_EPHEMERAL_CODE env var into a single boolean decision,
+// mirroring removeOnExitEnabled's flag-or-truthy-env pattern
+// (cleanup_binary.go).
+func ephemeralCodeEnabled(flagSet bool, getenv func(string) string) bool {
+	if flagSet {
+		return true
+	}
+	return isTruthy(getenv("CLAUDE_DISTANT_EPHEMERAL_CODE"))
 }
 
 // runForever maintains the connection to the relay, reconnecting with
@@ -204,7 +272,8 @@ func runSession(ctx context.Context, cfg config, ws *Workspace) error {
 	defer conn.Close()
 
 	hostname, _ := os.Hostname()
-	if err := conn.WriteJSON(NewRegisterMessage(runtime.GOOS, hostname, version, ClientCapabilities)); err != nil {
+	desiredCode := resolveDesiredCode(cfg, MachineID)
+	if err := conn.WriteJSON(NewRegisterMessage(runtime.GOOS, hostname, version, ClientCapabilities, desiredCode)); err != nil {
 		return fmt.Errorf("envoi register: %w", err)
 	}
 
@@ -220,7 +289,12 @@ func runSession(ctx context.Context, cfg config, ws *Workspace) error {
 
 	stdin := bufio.NewReader(os.Stdin)
 	confirmFn := func(command string) (bool, bool) { return PromptConfirm(stdin, command) }
-	executor := NewExecutor(conn, cfg.policy, confirmFn, ws.Dir())
+	// events is nil here: the console entry point (this file) has no
+	// activity log to feed and must not gain any stdout noise from one —
+	// a non-regression this package's tests pin down explicitly. The GUI
+	// entry point (client/gui.go, out of this task's scope) is expected to
+	// build its own Executor with a non-nil sink instead.
+	executor := NewExecutor(conn, NewPolicyController(cfg.policy), confirmFn, ws.Dir(), nil)
 
 	go heartbeatLoop(sessionCtx, conn)
 
@@ -260,6 +334,30 @@ func runSession(ctx context.Context, cfg config, ws *Workspace) error {
 			log.Printf("message inconnu reçu du relay: %s", msgType)
 		}
 	}
+}
+
+// resolveDesiredCode computes the register message's desired_code field
+// (docs/PROTOCOL.md, client/identity.go): HMAC-derived from this
+// machine's MachineID and the (possibly compiled-in) identity secret,
+// unless --ephemeral-code opted back into the old random-code-per-connection
+// behavior. machineID is injected (MachineID in production) so this stays
+// testable without touching the real machine. A MachineID failure degrades
+// to "" (no desired_code sent) rather than a fatal error — exactly what an
+// old, pre-stable-address client did, and the relay's documented fallback
+// (docs/PROTOCOL.md) already covers that case.
+func resolveDesiredCode(cfg config, machineID func() (string, error)) string {
+	if cfg.ephemeralCode {
+		return ""
+	}
+	id, err := machineID()
+	if err != nil || id == "" {
+		return ""
+	}
+	secret := cfg.identitySecret
+	if secret == "" {
+		secret = defaultIdentitySalt
+	}
+	return DeriveSessionCode(secret, id)
 }
 
 func heartbeatLoop(ctx context.Context, conn *Conn) {

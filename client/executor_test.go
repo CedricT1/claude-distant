@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -186,7 +187,7 @@ func TestBuildShellCommand_SetsWorkingDirectoryToWorkspace(t *testing.T) {
 // command string must not prompt again for the rest of the session.
 
 func TestExecutor_AlwaysAllowedRemembersExactCommand(t *testing.T) {
-	e := NewExecutor(nil, PolicyConfirm, nil, "")
+	e := NewExecutor(nil, NewPolicyController(PolicyConfirm), nil, "", nil)
 	if e.isAlwaysAllowed("rm -rf /tmp/x") {
 		t.Fatal("isAlwaysAllowed = true before any approval, want false")
 	}
@@ -205,7 +206,7 @@ func TestExecutor_ResolveApproval_AlwaysAnswerSkipsFuturePrompts(t *testing.T) {
 		calls++
 		return true, true // operator picks "toujours" the one time they're asked
 	}
-	e := NewExecutor(nil, PolicyConfirm, confirm, "")
+	e := NewExecutor(nil, NewPolicyController(PolicyConfirm), confirm, "", nil)
 
 	if approved := e.resolveApproval("shutdown -h now"); !approved || calls != 1 {
 		t.Fatalf("first resolveApproval: approved=%v calls=%d, want true/1", approved, calls)
@@ -227,7 +228,7 @@ func TestExecutor_ResolveApproval_OnceAnswerDoesNotMemoize(t *testing.T) {
 		calls++
 		return true, false // operator approves just this once
 	}
-	e := NewExecutor(nil, PolicyConfirm, confirm, "")
+	e := NewExecutor(nil, NewPolicyController(PolicyConfirm), confirm, "", nil)
 
 	e.resolveApproval("shutdown -h now")
 	e.resolveApproval("shutdown -h now")
@@ -368,7 +369,7 @@ func TestExecutor_ReadFile_PolicyDenyRefusesWithoutReadingTheFile(t *testing.T) 
 	conn, recv := newLoopbackConn(t)
 
 	confirm := &recordingConfirm{approve: true}
-	e := NewExecutor(conn, PolicyDeny, confirm.fn, "")
+	e := NewExecutor(conn, NewPolicyController(PolicyDeny), confirm.fn, "", nil)
 	e.Handle(context.Background(), fileCommand(t, "r1", "read_file", map[string]any{"path": path}))
 
 	msgs := collectUntilResult(t, recv)
@@ -388,7 +389,7 @@ func TestExecutor_WriteFile_PolicyDenyRefusesWithoutTouchingDisk(t *testing.T) {
 	conn, recv := newLoopbackConn(t)
 
 	confirm := &recordingConfirm{approve: true}
-	e := NewExecutor(conn, PolicyDeny, confirm.fn, "")
+	e := NewExecutor(conn, NewPolicyController(PolicyDeny), confirm.fn, "", nil)
 	e.Handle(context.Background(), fileCommand(t, "r1", "write_file", map[string]any{
 		"path":           path,
 		"content_base64": base64.StdEncoding.EncodeToString([]byte("charge utile")),
@@ -410,7 +411,7 @@ func TestExecutor_ReadFile_PolicyConfirmPromptsAndHonorsRefusal(t *testing.T) {
 	conn, recv := newLoopbackConn(t)
 
 	confirm := &recordingConfirm{approve: false}
-	e := NewExecutor(conn, PolicyConfirm, confirm.fn, "")
+	e := NewExecutor(conn, NewPolicyController(PolicyConfirm), confirm.fn, "", nil)
 	e.Handle(context.Background(), fileCommand(t, "r1", "read_file", map[string]any{"path": path}))
 
 	msgs := collectUntilResult(t, recv)
@@ -431,7 +432,7 @@ func TestExecutor_ReadFile_PolicyConfirmApprovedPerformsTransfer(t *testing.T) {
 	conn, recv := newLoopbackConn(t)
 
 	confirm := &recordingConfirm{approve: true}
-	e := NewExecutor(conn, PolicyConfirm, confirm.fn, "")
+	e := NewExecutor(conn, NewPolicyController(PolicyConfirm), confirm.fn, "", nil)
 	e.Handle(context.Background(), fileCommand(t, "r1", "read_file", map[string]any{"path": path}))
 
 	msgs := collectUntilResult(t, recv)
@@ -473,7 +474,7 @@ func TestExecutor_WriteFile_PolicyConfirmPromptsWithSizeAndHonorsRefusal(t *test
 	conn, recv := newLoopbackConn(t)
 
 	confirm := &recordingConfirm{approve: false}
-	e := NewExecutor(conn, PolicyConfirm, confirm.fn, "")
+	e := NewExecutor(conn, NewPolicyController(PolicyConfirm), confirm.fn, "", nil)
 	e.Handle(context.Background(), fileCommand(t, "r1", "write_file", map[string]any{
 		"path":           path,
 		"content_base64": base64.StdEncoding.EncodeToString(content),
@@ -498,7 +499,7 @@ func TestExecutor_WriteFile_PolicyConfirmApprovedPerformsTransfer(t *testing.T) 
 	conn, recv := newLoopbackConn(t)
 
 	confirm := &recordingConfirm{approve: true}
-	e := NewExecutor(conn, PolicyConfirm, confirm.fn, "")
+	e := NewExecutor(conn, NewPolicyController(PolicyConfirm), confirm.fn, "", nil)
 	e.Handle(context.Background(), fileCommand(t, "r1", "write_file", map[string]any{
 		"path":           path,
 		"content_base64": base64.StdEncoding.EncodeToString(content),
@@ -530,7 +531,7 @@ func TestExecutor_ReadFile_PolicyAutoNeverPrompts(t *testing.T) {
 	conn, recv := newLoopbackConn(t)
 
 	confirm := &recordingConfirm{approve: false}
-	e := NewExecutor(conn, PolicyAuto, confirm.fn, "")
+	e := NewExecutor(conn, NewPolicyController(PolicyAuto), confirm.fn, "", nil)
 	e.Handle(context.Background(), fileCommand(t, "r1", "read_file", map[string]any{"path": path}))
 
 	msgs := collectUntilResult(t, recv)
@@ -552,7 +553,7 @@ func TestExecutor_WriteFile_PolicyAutoNeverPrompts(t *testing.T) {
 	conn, recv := newLoopbackConn(t)
 
 	confirm := &recordingConfirm{approve: false}
-	e := NewExecutor(conn, PolicyAuto, confirm.fn, "")
+	e := NewExecutor(conn, NewPolicyController(PolicyAuto), confirm.fn, "", nil)
 	e.Handle(context.Background(), fileCommand(t, "r1", "write_file", map[string]any{
 		"path":           path,
 		"content_base64": base64.StdEncoding.EncodeToString([]byte("auto")),
@@ -575,7 +576,7 @@ func TestExecutor_ReadFile_MissingFileReportsStableErrorCode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "absent.txt")
 	conn, recv := newLoopbackConn(t)
 
-	e := NewExecutor(conn, PolicyAuto, nil, "")
+	e := NewExecutor(conn, NewPolicyController(PolicyAuto), nil, "", nil)
 	e.Handle(context.Background(), fileCommand(t, "r1", "read_file", map[string]any{"path": path}))
 
 	msgs := collectUntilResult(t, recv)
@@ -592,7 +593,7 @@ func TestExecutor_WriteFile_InvalidBase64ReportsStableErrorCode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "out.txt")
 	conn, recv := newLoopbackConn(t)
 
-	e := NewExecutor(conn, PolicyAuto, nil, "")
+	e := NewExecutor(conn, NewPolicyController(PolicyAuto), nil, "", nil)
 	e.Handle(context.Background(), fileCommand(t, "r1", "write_file", map[string]any{
 		"path":           path,
 		"content_base64": "pas du base64 !!",
@@ -605,6 +606,219 @@ func TestExecutor_WriteFile_InvalidBase64ReportsStableErrorCode(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Error("un fichier a été créé malgré un base64 invalide")
+	}
+}
+
+// --- PolicyController wiring: Executor must consult Get() on every decision ---
+//
+// Red-first tests for the PolicyController plumbing (Executor.policy is
+// still a bare Policy at this point). Every
+// NewExecutor(...) call above was mechanically adapted to
+// NewExecutor(conn, NewPolicyController(policy), confirm, workDir, nil) —
+// same assertions, new plumbing — so those are the non-regression: this
+// section adds genuinely new behavior.
+
+func TestExecutor_PolicyController_LiveChangeTakesEffectImmediately(t *testing.T) {
+	controller := NewPolicyController(PolicyDeny)
+	conn, recv := newLoopbackConn(t)
+	e := NewExecutor(conn, controller, nil, "", nil)
+
+	e.Handle(context.Background(), fileCommand(t, "r1", "read_file", map[string]any{"path": "/etc/hosts"}))
+	assertResult(t, collectUntilResult(t, recv), 126, "refused_by_policy")
+
+	// Flip the policy at runtime, exactly as the GUI's "mode automatique"
+	// switch would (client/gui.go) — the very next decision must honor it
+	// immediately, without recreating the Executor or restarting the
+	// session.
+	controller.Set(PolicyAuto)
+
+	path := writeTempFile(t, t.TempDir(), "data.txt", []byte("x"))
+	e.Handle(context.Background(), fileCommand(t, "r2", "read_file", map[string]any{"path": path}))
+	msgs := collectUntilResult(t, recv)
+	assertResult(t, msgs, 0, nil)
+	if n := len(messagesOfType(msgs, "approval_response")); n != 0 {
+		t.Errorf("%d approval_response after switching to PolicyAuto, want 0", n)
+	}
+}
+
+// --- Executor event sink: emission for the GUI's live activity log ---
+//
+// eventRecorder is a minimal, concurrency-safe func(ActivityEvent) sink for
+// tests. A mutex is used (rather than assuming single-threaded access) since
+// production Executors can run several commands concurrently on separate
+// goroutines (see main.go's runSession comment on why Handle runs in its
+// own goroutine per command).
+type eventRecorder struct {
+	mu     sync.Mutex
+	events []ActivityEvent
+}
+
+func (r *eventRecorder) record(e ActivityEvent) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, e)
+}
+
+func (r *eventRecorder) all() []ActivityEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]ActivityEvent, len(r.events))
+	copy(out, r.events)
+	return out
+}
+
+func (r *eventRecorder) kinds() []ActivityKind {
+	var out []ActivityKind
+	for _, e := range r.all() {
+		out = append(out, e.Kind)
+	}
+	return out
+}
+
+func TestExecutor_Handle_EmitsCommandReceivedEventFirst(t *testing.T) {
+	rec := &eventRecorder{}
+	conn, recv := newLoopbackConn(t)
+	e := NewExecutor(conn, NewPolicyController(PolicyAuto), nil, "", rec.record)
+
+	e.Handle(context.Background(), fileCommand(t, "r1", "system_info", map[string]any{}))
+	collectUntilResult(t, recv)
+
+	kinds := rec.kinds()
+	if len(kinds) == 0 || kinds[0] != ActivityCommand {
+		t.Fatalf("emitted kinds = %v, want ActivityCommand first", kinds)
+	}
+}
+
+func TestExecutor_ResolveApproval_EmitsRequestAndDecisionEvents(t *testing.T) {
+	rec := &eventRecorder{}
+	confirm := &recordingConfirm{approve: true}
+	e := NewExecutor(nil, NewPolicyController(PolicyConfirm), confirm.fn, "", rec.record)
+
+	e.resolveApproval("shutdown -h now")
+
+	approvalCount := 0
+	for _, k := range rec.kinds() {
+		if k == ActivityApproval {
+			approvalCount++
+		}
+	}
+	if approvalCount != 2 {
+		t.Errorf("emitted %d ActivityApproval events, want 2 (one request, one decision); kinds = %v", approvalCount, rec.kinds())
+	}
+}
+
+func TestExecutor_ResolveApproval_MemoizedAlwaysDoesNotReemitOnSecondCall(t *testing.T) {
+	rec := &eventRecorder{}
+	confirm := &recordingConfirm{approve: true, always: true}
+	e := NewExecutor(nil, NewPolicyController(PolicyConfirm), confirm.fn, "", rec.record)
+
+	e.resolveApproval("shutdown -h now") // prompts once, remembers "toujours"
+	before := len(rec.kinds())
+	e.resolveApproval("shutdown -h now") // memoized: no re-prompt, no new event
+	after := len(rec.kinds())
+	if after != before {
+		t.Errorf("second (memoized) resolveApproval emitted %d new events, want 0", after-before)
+	}
+}
+
+func TestExecutor_ReadFile_EmitsFileReadEventOnSuccess(t *testing.T) {
+	content := []byte("data")
+	path := writeTempFile(t, t.TempDir(), "data.txt", content)
+	rec := &eventRecorder{}
+	conn, recv := newLoopbackConn(t)
+	e := NewExecutor(conn, NewPolicyController(PolicyAuto), nil, "", rec.record)
+
+	e.Handle(context.Background(), fileCommand(t, "r1", "read_file", map[string]any{"path": path}))
+	collectUntilResult(t, recv)
+
+	found := false
+	for _, k := range rec.kinds() {
+		if k == ActivityFileRead {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no ActivityFileRead event emitted, kinds = %v", rec.kinds())
+	}
+}
+
+func TestExecutor_WriteFile_EmitsFileWriteEventOnSuccess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.txt")
+	rec := &eventRecorder{}
+	conn, recv := newLoopbackConn(t)
+	e := NewExecutor(conn, NewPolicyController(PolicyAuto), nil, "", rec.record)
+
+	e.Handle(context.Background(), fileCommand(t, "r1", "write_file", map[string]any{
+		"path":           path,
+		"content_base64": base64.StdEncoding.EncodeToString([]byte("x")),
+	}))
+	collectUntilResult(t, recv)
+
+	found := false
+	for _, k := range rec.kinds() {
+		if k == ActivityFileWrite {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no ActivityFileWrite event emitted, kinds = %v", rec.kinds())
+	}
+}
+
+func TestExecutor_EmitsResultEventCarryingExitCode(t *testing.T) {
+	rec := &eventRecorder{}
+	conn, recv := newLoopbackConn(t)
+	e := NewExecutor(conn, NewPolicyController(PolicyDeny), nil, "", rec.record)
+
+	e.Handle(context.Background(), fileCommand(t, "r1", "read_file", map[string]any{"path": "/etc/hosts"}))
+	collectUntilResult(t, recv)
+
+	found := false
+	for _, ev := range rec.all() {
+		if ev.Kind == ActivityResult && contains(ev.Detail, "126") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no ActivityResult event carrying exit code 126, events = %+v", rec.all())
+	}
+}
+
+func TestExecutor_ReadFile_SuccessfulTransferAlsoEmitsResultEvent(t *testing.T) {
+	// Success results are written via NewResultMessageWithMeta directly
+	// (not through the plain sendResult path used by run_shell/run_command),
+	// so this pins that both routes reach the event sink.
+	content := []byte("data")
+	path := writeTempFile(t, t.TempDir(), "data.txt", content)
+	rec := &eventRecorder{}
+	conn, recv := newLoopbackConn(t)
+	e := NewExecutor(conn, NewPolicyController(PolicyAuto), nil, "", rec.record)
+
+	e.Handle(context.Background(), fileCommand(t, "r1", "read_file", map[string]any{"path": path}))
+	collectUntilResult(t, recv)
+
+	found := false
+	for _, ev := range rec.all() {
+		if ev.Kind == ActivityResult {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no ActivityResult event emitted for a successful read_file, events = %+v", rec.all())
+	}
+}
+
+// Non-regression #2 (mandated by the task spec): a nil events sink —
+// the default for every pre-existing caller, including main.go's console
+// entry point — must not change the Executor's behavior in any way. The 13
+// mechanically-adapted NewExecutor(...) calls elsewhere in this file (all
+// passing nil for events, unchanged assertions) are the broad version of
+// this pin; this test exercises the guard-rail path directly.
+func TestExecutor_NilEventsSinkDoesNotChangeApprovalBehavior(t *testing.T) {
+	confirm := &recordingConfirm{approve: true}
+	e := NewExecutor(nil, NewPolicyController(PolicyConfirm), confirm.fn, "", nil)
+	if !e.resolveApproval("anything") {
+		t.Fatal("resolveApproval with a nil events sink behaved differently than with one attached")
 	}
 }
 

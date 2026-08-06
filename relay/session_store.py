@@ -24,6 +24,11 @@ def generate_session_code() -> str:
     return f"{secrets.randbelow(CODE_UPPER_BOUND):0{CODE_LENGTH}d}"
 
 
+def _is_valid_code_syntax(code: str) -> bool:
+    """Un code de session valide est une chaîne d'exactement 9 chiffres décimaux."""
+    return len(code) == CODE_LENGTH and code.isdigit()
+
+
 def normalize_capabilities(capabilities: Sequence[str] | None) -> tuple[str, ...]:
     """Normalise une liste de capacités déclarées en tuple immuable.
 
@@ -71,11 +76,20 @@ class SessionStore(abc.ABC):
         ttl_seconds: float,
         *,
         capabilities: Sequence[str] | None = None,
+        desired_code: str | None = None,
     ) -> str:
         """Enregistre une nouvelle connexion et retourne le code attribué (unique).
 
         `capabilities` est keyword-only et optionnel : les appelants historiques
         (à cinq arguments) restent valides et obtiennent `()`.
+
+        `desired_code` (keyword-only, optionnel — adresse stable, cf.
+        `docs/PROTOCOL.md`) est honoré tel quel s'il est syntaxiquement valide
+        (exactement 9 chiffres) **et libre** ; sinon le tirage aléatoire habituel
+        s'applique. Premier arrivé, premier servi : aucune implémentation ne
+        doit évincer une connexion existante détentrice du code, ce qui
+        ouvrirait un détournement de session à un client se contentant de
+        rejouer le code d'un tiers.
         """
 
     @abc.abstractmethod
@@ -107,7 +121,19 @@ class SessionStore(abc.ABC):
 
 
 class InMemorySessionStore(SessionStore):
-    """Implémentation en mémoire process : dict + `asyncio.Lock`."""
+    """Implémentation en mémoire process : dict + `asyncio.Lock`.
+
+    Course à la reconnexion (cf. `docs/PROTOCOL.md`) : la session reste
+    éphémère (TTL, heartbeat, suppression à la déconnexion — rien de tout ça
+    ne change ici), seule l'adresse est stable. Si un client se reconnecte
+    avant que `remove_by_connection` n'ait nettoyé son ancien enregistrement
+    (WebSocket morte pas encore constatée côté serveur), le code souhaité
+    apparaît occupé et cette nouvelle session obtient un code aléatoire.
+    Fenêtre étroite mais réelle, et c'est un repli sûr : la seule alternative
+    serait d'évincer l'ancienne connexion sur simple déclaration du nouveau
+    client, ce qui reviendrait à laisser n'importe qui réclamer le code de
+    quelqu'un d'autre.
+    """
 
     def __init__(self, code_generator: Callable[[], str] = generate_session_code) -> None:
         self._records: dict[str, SessionRecord] = {}
@@ -123,14 +149,27 @@ class InMemorySessionStore(SessionStore):
         ttl_seconds: float,
         *,
         capabilities: Sequence[str] | None = None,
+        desired_code: str | None = None,
     ) -> str:
         async with self._lock:
             code = None
-            for _ in range(MAX_CREATE_ATTEMPTS):
-                candidate = self._code_generator()
-                if candidate not in self._records:
-                    code = candidate
-                    break
+            # Adresse stable : le code souhaité n'est retenu que s'il est
+            # syntaxiquement valide et libre à cet instant précis. Pas de
+            # file d'attente, pas d'éviction — un client qui perd la course
+            # (cf. docstring de la classe) retombe simplement sur le tirage
+            # aléatoire, comme s'il n'avait rien demandé.
+            if (
+                isinstance(desired_code, str)
+                and _is_valid_code_syntax(desired_code)
+                and desired_code not in self._records
+            ):
+                code = desired_code
+            else:
+                for _ in range(MAX_CREATE_ATTEMPTS):
+                    candidate = self._code_generator()
+                    if candidate not in self._records:
+                        code = candidate
+                        break
             if code is None:
                 raise RuntimeError("impossible de générer un code de session unique")
             now = time.monotonic()

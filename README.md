@@ -8,8 +8,8 @@ Accès distant piloté par un harnais IA (Claude) pour l'administration système
 
 **Invariants de sécurité** :
 - Le PC distant n'ouvre **aucun port entrant** : seule connexion **sortante** WebSocket/TLS vers le relay
-- Client **portable, sans installation, sans résidu** : binaire unique lancé depuis un dossier temporaire, auto-nettoyage à la fermeture
-- Sessions **éphémères** : codes 9 chiffres à durée de vie courte (30 min par défaut)
+- Client **portable, sans installation, sans résidu** : binaire unique lancé depuis un dossier temporaire, auto-nettoyage à la fermeture — en variante console (par défaut) ou GUI (fenêtre Fyne, postes de bureau), voir `client/README.md`
+- Sessions **éphémères** : codes 9 chiffres à durée de vie courte (30 min par défaut) ; le *code* peut être rendu stable d'une reconnexion à l'autre (adresse dérivée de la machine), sans changer la durée de vie de la session — voir `docs/PROTOCOL.md`
 - **Consentement explicite** : l'utilisateur voit le code et approuve les commandes sensibles selon la politique locale
 
 ## Architecture
@@ -32,7 +32,7 @@ Accès distant piloté par un harnais IA (Claude) pour l'administration système
 
 ### Flot type
 
-1. **Lancement du client** : l'opérateur lance le binaire Go sur la machine distante
+1. **Lancement du client** : l'opérateur lance le binaire Go sur la machine distante — console ou GUI, générique ou personnalisé (compilé avec URL/token embarqués pour un lancement sans argument, voir `client/README.md`)
 2. **Enregistrement** : le client se connecte au relay via WebSocket/TLS, reçoit un code unique (ex. `784 123 678`)
 3. **Partage du code** : l'opérateur donne ce code au harness (Claude)
 4. **Connexion du harness** : Claude utilise l'outil MCP `connect_session(code)` pour s'authentifier auprès du relay
@@ -91,10 +91,11 @@ Placez votre reverse proxy **TLS externe** (Caddy/nginx/Traefik) devant ce port 
 
 ```bash
 cd client
-go build -o claude-distant .          # build local rapide
+go build -o claude-distant .          # build local rapide (console)
 # ou, binaires portables strippés (linux amd64/arm64 + windows amd64) :
-make dist                             # sorties dans client/dist/
-make checksums                        # SHA256SUMS
+make dist                             # console -> client/dist/
+make dist-gui                         # + variante GUI (Fyne), voir docs/PACKAGING.md
+make checksums                        # SHA256SUMS (couvre les deux familles)
 ```
 
 ### 3. Lancer le client sur la machine distante

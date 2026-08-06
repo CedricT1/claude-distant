@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // Policy is the local guard-rail mode the client was launched with
@@ -30,6 +31,41 @@ func ParsePolicy(s string) (Policy, error) {
 	default:
 		return "", fmt.Errorf("politique invalide %q (attendu: auto|confirm|deny)", s)
 	}
+}
+
+// PolicyController holds the local guard-rail Policy as a value that can be
+// changed while the client is running — e.g. the GUI's "mode automatique"
+// switch (client/gui.go) toggling between PolicyAuto and PolicyConfirm — and
+// consulted from a different goroutine than the one changing it. Executor
+// holds a *PolicyController rather than a bare Policy and calls Get() at
+// every guard-rail decision, so a Set() takes effect on the very next
+// command, without restarting the session. Safe for concurrent use: a
+// sync.RWMutex protects the value (RLock lets concurrent commands read the
+// policy without blocking each other; Lock is only taken by the rarer
+// Set()).
+type PolicyController struct {
+	mu sync.RWMutex
+	p  Policy
+}
+
+// NewPolicyController creates a PolicyController initialized to p (typically
+// the --policy flag's resolved value at startup).
+func NewPolicyController(p Policy) *PolicyController {
+	return &PolicyController{p: p}
+}
+
+// Get returns the current policy. Safe to call from any goroutine.
+func (c *PolicyController) Get() Policy {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.p
+}
+
+// Set changes the current policy. Safe to call from any goroutine.
+func (c *PolicyController) Set(p Policy) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.p = p
 }
 
 // destructivePatterns is a simple, documented, and easily extensible list of

@@ -159,8 +159,12 @@ func splitArgv(command string) ([]string, error) {
 // reports their outcome back over conn, applying the local guard-rail
 // policy to potentially destructive commands before running them.
 type Executor struct {
-	conn    *Conn
-	policy  Policy
+	conn *Conn
+	// policy is a *PolicyController (not a bare Policy) so the GUI's "mode
+	// automatique" switch (client/gui.go) can change it while the client is
+	// running, from a different goroutine than the one making guard-rail
+	// decisions; Get() is consulted fresh on every decision, never cached.
+	policy  *PolicyController
 	confirm func(command string) (approved bool, always bool)
 	// workDir is the client's dedicated scratch Workspace directory
 	// (workspace.go). Spawned commands default their working directory
@@ -171,6 +175,14 @@ type Executor struct {
 	// default), which keeps this backward compatible for callers that
 	// don't have a workspace (e.g. existing tests).
 	workDir string
+	// events is an optional sink the Executor reports its activity to (a
+	// command was received, an approval was requested/decided, a file was
+	// read/written, a result was sent). It backs
+	// the GUI's live activity log (client/activitylog.go), but is entirely
+	// optional: nil (the default for main.go's console entry point) is a
+	// documented no-op, so a client built without a GUI behaves exactly as
+	// it did before this field existed — see emit().
+	events func(ActivityEvent)
 
 	// alwaysMu guards alwaysAllowed, the set of exact command strings the
 	// operator approved with "toujours" at the confirm prompt. It is
@@ -179,19 +191,34 @@ type Executor struct {
 	alwaysAllowed map[string]bool
 }
 
-// NewExecutor builds an Executor. confirm is invoked only when policy is
-// PolicyConfirm and the command is classified destructive; it should block
-// until the local operator answers. workDir is the working directory
-// spawned commands run in (see the Executor.workDir field doc); pass "" to
-// fall back to the process's current directory.
-func NewExecutor(conn *Conn, policy Policy, confirm func(command string) (approved bool, always bool), workDir string) *Executor {
-	return &Executor{conn: conn, policy: policy, confirm: confirm, workDir: workDir, alwaysAllowed: make(map[string]bool)}
+// NewExecutor builds an Executor. confirm is invoked only when the policy
+// (policy.Get()) is PolicyConfirm and the command is classified
+// destructive; it should block until the local operator answers. workDir is
+// the working directory spawned commands run in (see the Executor.workDir
+// field doc); pass "" to fall back to the process's current directory.
+// events is the optional activity sink described on the Executor.events
+// field; pass nil for none (e.g. console mode, which must add no stdout
+// noise of its own).
+func NewExecutor(conn *Conn, policy *PolicyController, confirm func(command string) (approved bool, always bool), workDir string, events func(ActivityEvent)) *Executor {
+	return &Executor{conn: conn, policy: policy, confirm: confirm, workDir: workDir, events: events, alwaysAllowed: make(map[string]bool)}
+}
+
+// emit reports an ActivityEvent to e.events, doing nothing when it is nil.
+// This nil-safety is the non-regression the event sink feature must never
+// break: every pre-existing caller (and every test written before this
+// field existed) passes nil and must keep behaving exactly as before.
+func (e *Executor) emit(kind ActivityKind, detail string) {
+	if e.events == nil {
+		return
+	}
+	e.events(ActivityEvent{Time: time.Now(), Kind: kind, Detail: detail})
 }
 
 // Handle dispatches a single `command` message to the right tool. It always
 // sends a final `result` message, even when the tool name is unknown or
 // params fail to decode.
 func (e *Executor) Handle(ctx context.Context, cmd CommandMessage) {
+	e.emit(ActivityCommand, fmt.Sprintf("%s (request %s)", cmd.Tool, cmd.RequestID))
 	switch cmd.Tool {
 	case "run_shell":
 		e.runShellOrCommand(ctx, cmd, true)
@@ -369,7 +396,21 @@ func (e *Executor) handleSystemInfo(cmd CommandMessage) {
 }
 
 func (e *Executor) sendResult(requestID string, exitCode int, errMsg string) {
-	_ = e.conn.WriteJSON(NewResultMessage(requestID, exitCode, errMsg))
+	e.sendResultWithMeta(requestID, exitCode, errMsg, nil)
+}
+
+// sendResultWithMeta is sendResult's superset: every `result` message —
+// whether built via sendResult or, for a successful file transfer, directly
+// with its meta payload — funnels through here, so the "result with exit
+// code" activity event is emitted exactly once per command regardless of
+// which path produced it.
+func (e *Executor) sendResultWithMeta(requestID string, exitCode int, errMsg string, meta map[string]any) {
+	detail := fmt.Sprintf("request %s: exit=%d", requestID, exitCode)
+	if errMsg != "" {
+		detail += " error=" + errMsg
+	}
+	e.emit(ActivityResult, detail)
+	_ = e.conn.WriteJSON(NewResultMessageWithMeta(requestID, exitCode, errMsg, meta))
 }
 
 func (e *Executor) sendApprovalResponse(requestID string, approved bool) {
@@ -382,7 +423,7 @@ func (e *Executor) sendApprovalResponse(requestID string, approved bool) {
 // terminating `approval_response` + `result` pair has already been sent, so
 // the caller only has to return.
 func (e *Executor) passesGuardRail(requestID, description string) bool {
-	switch e.policy {
+	switch e.policy.Get() {
 	case PolicyDeny:
 		e.sendApprovalResponse(requestID, false)
 		e.sendResult(requestID, 126, "refused_by_policy")
@@ -416,15 +457,17 @@ func (e *Executor) handleReadFile(cmd CommandMessage) {
 		return
 	}
 
-	emit := func(seq int, data string) error {
+	sendChunk := func(seq int, data string) error {
 		return e.conn.WriteJSON(NewFileChunkMessage(cmd.RequestID, seq, data))
 	}
-	meta, err := readFileTransfer(p, emit)
+	meta, err := readFileTransfer(p, sendChunk)
 	if err != nil {
+		e.emit(ActivityFileRead, fmt.Sprintf("échec: %s (%s)", p.Path, fileErrorCode(err)))
 		e.sendResult(cmd.RequestID, 1, fileErrorCode(err))
 		return
 	}
-	_ = e.conn.WriteJSON(NewResultMessageWithMeta(cmd.RequestID, 0, "", meta))
+	e.emit(ActivityFileRead, fmt.Sprintf("%s (%v octets)", p.Path, meta["size"]))
+	e.sendResultWithMeta(cmd.RequestID, 0, "", meta)
 }
 
 // handleWriteFile installs a file sent by the harness onto this machine. It
@@ -447,10 +490,12 @@ func (e *Executor) handleWriteFile(cmd CommandMessage) {
 
 	meta, err := writeFileTransfer(p)
 	if err != nil {
+		e.emit(ActivityFileWrite, fmt.Sprintf("échec: %s (%s)", p.Path, fileErrorCode(err)))
 		e.sendResult(cmd.RequestID, 1, fileErrorCode(err))
 		return
 	}
-	_ = e.conn.WriteJSON(NewResultMessageWithMeta(cmd.RequestID, 0, "", meta))
+	e.emit(ActivityFileWrite, fmt.Sprintf("%s (%v octets)", p.Path, meta["bytes_written"]))
+	e.sendResultWithMeta(cmd.RequestID, 0, "", meta)
 }
 
 // resolveApproval decides whether a destructive command may run under
@@ -465,11 +510,22 @@ func (e *Executor) resolveApproval(command string) bool {
 	if e.confirm == nil {
 		return false
 	}
+	e.emit(ActivityApproval, "demande: "+command)
 	approved, always := e.confirm(command)
+	e.emit(ActivityApproval, fmt.Sprintf("décision: %s (%s)", approvalWord(approved), command))
 	if approved && always {
 		e.rememberAlwaysAllowed(command)
 	}
 	return approved
+}
+
+// approvalWord renders an approval decision for the activity log, in the
+// same vocabulary as PromptConfirm's own French prompt (policy.go).
+func approvalWord(approved bool) string {
+	if approved {
+		return "autorisée"
+	}
+	return "refusée"
 }
 
 func (e *Executor) isAlwaysAllowed(command string) bool {

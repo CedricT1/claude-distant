@@ -11,7 +11,7 @@ import (
 // and types below are the minimal contract protocol.go must satisfy.
 
 func TestRegisterMessage_MarshalsProtocolFields(t *testing.T) {
-	msg := NewRegisterMessage("linux", "srv01", "0.1.0", nil)
+	msg := NewRegisterMessage("linux", "srv01", "0.1.0", nil, "")
 
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -45,7 +45,7 @@ func TestRegisterMessage_OmitsCapabilitiesWhenNone(t *testing.T) {
 		"nil":   nil,
 		"empty": {},
 	} {
-		data, err := json.Marshal(NewRegisterMessage("linux", "srv01", "0.1.0", caps))
+		data, err := json.Marshal(NewRegisterMessage("linux", "srv01", "0.1.0", caps, ""))
 		if err != nil {
 			t.Fatalf("%s: marshal: %v", name, err)
 		}
@@ -60,7 +60,7 @@ func TestRegisterMessage_OmitsCapabilitiesWhenNone(t *testing.T) {
 }
 
 func TestRegisterMessage_WithCapabilities(t *testing.T) {
-	data, err := json.Marshal(NewRegisterMessage("windows", "srv02", "0.2.0", []string{"file_transfer"}))
+	data, err := json.Marshal(NewRegisterMessage("windows", "srv02", "0.2.0", []string{"file_transfer"}, ""))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -74,6 +74,38 @@ func TestRegisterMessage_WithCapabilities(t *testing.T) {
 	}
 	if len(caps) != 1 || caps[0] != "file_transfer" {
 		t.Errorf("capabilities = %v, want [file_transfer]", caps)
+	}
+}
+
+// desired_code follows exactly the same additive, backward-compatible
+// pattern as capabilities (docs/PROTOCOL.md): an old relay ignores
+// the unknown field, and a client with nothing to request must serialize
+// register byte-for-byte as before — no "desired_code" key at all.
+func TestRegisterMessage_OmitsDesiredCodeWhenEmpty(t *testing.T) {
+	data, err := json.Marshal(NewRegisterMessage("linux", "srv01", "0.1.0", nil, ""))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, present := got["desired_code"]; present {
+		t.Errorf("champ desired_code présent (%v), attendu absent grâce à omitempty — régression de sérialisation", got["desired_code"])
+	}
+}
+
+func TestRegisterMessage_WithDesiredCode(t *testing.T) {
+	data, err := json.Marshal(NewRegisterMessage("linux", "srv01", "0.1.0", []string{"file_transfer"}, "784123678"))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["desired_code"] != "784123678" {
+		t.Errorf("desired_code = %v, want 784123678", got["desired_code"])
 	}
 }
 

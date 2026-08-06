@@ -16,7 +16,7 @@ Chaque message est un objet JSON avec un champ `type`.
 ### Client → Relay
 | type | champs | rôle |
 |---|---|---|
-| `register` | `os` (`linux`\|`windows`), `hostname`, `version`, `capabilities?` (liste de str) | annonce à la connexion |
+| `register` | `os` (`linux`\|`windows`), `hostname`, `version`, `capabilities?` (liste de str), `desired_code?` (str, 9 chiffres) | annonce à la connexion |
 | `heartbeat` | — | maintien de session |
 | `stream` | `request_id`, `stream` (`stdout`\|`stderr`), `data` (str) | sortie partielle d'une commande |
 | `file_chunk` | `request_id`, `seq` (int, croissant depuis 0), `data` (base64) | tranche d'un fichier lu (§4) |
@@ -76,6 +76,69 @@ Les quatre combinaisons se comportent donc ainsi :
 
 Aucun champ existant n'a été renommé ni re-typé, et aucun champ requis n'a été
 ajouté : toute addition est optionnelle, dans les deux sens.
+
+### Adresse stable (`desired_code`)
+
+Le champ optionnel `desired_code` du `register` (chaîne de 9 chiffres) demande
+au relay de réattribuer le **même** code de session qu'à la connexion
+précédente, plutôt que d'en tirer un nouveau au hasard :
+
+```json
+{"type":"register","os":"linux","hostname":"srv01","version":"0.3.0",
+ "capabilities":["file_transfer"],"desired_code":"784123678"}
+```
+
+**Dérivation côté client** (`client/identity.go:DeriveSessionCode`) :
+`HMAC-SHA256(secret, MachineID)`, les 8 premiers octets du digest lus en
+big-endian, modulo 10^9, zéro-paddés sur 9 chiffres — pure et déterministe, le
+même résultat à chaque appel tant que `secret`/`MachineID` ne changent pas.
+`MachineID` (`client/identity.go`, `client/identity_linux.go`,
+`client/identity_windows.go`) lit `/etc/machine-id` (repli
+`/var/lib/dbus/machine-id`) sur Linux, `MachineGuid` de
+`SOFTWARE\Microsoft\Cryptography` dans la registry sur Windows, et se rabat
+sur le hostname si rien n'est lisible — toujours en lecture seule, jamais
+d'écriture disque. `secret` est l'`IDENTITY_SECRET` compilé dans le binaire
+(`client/Makefile`), ou un sel par défaut du projet si absent — voir
+`docs/SECURITY.md` pour les implications de sécurité de ce repli. Le flag
+`--ephemeral-code` (ou `CLAUDE_DISTANT_EPHEMERAL_CODE`) désactive tout ceci et
+revient à l'ancien comportement : `desired_code` omis, code aléatoire à chaque
+connexion.
+
+**Principe directeur : stabilité du *code*, pas permanence de la *session*.**
+Rien d'autre ne change côté relay — TTL, heartbeat et suppression de la
+session à la déconnexion restent **inchangés** (`relay/session_store.py`) : la
+session reste éphémère et meurt avec la connexion WebSocket, exactement comme
+avant l'introduction de cette fonctionnalité. Seule l'*adresse* (le code)
+redevient prévisible d'une reconnexion à l'autre, ce qui permet au harnais de
+retrouver la même machine après un redémarrage du client sans renégociation
+manuelle du code.
+
+**Attribution côté relay** (`SessionStore.create(..., desired_code=...)`,
+`relay/session_store.py`) : `desired_code` n'est honoré que s'il est
+syntaxiquement valide (exactement 9 chiffres) **et libre** au moment de la
+création ; sinon le tirage aléatoire habituel s'applique, silencieusement,
+sans erreur ni avertissement particulier renvoyé au client — celui-ci apprend
+de toute façon le code réellement attribué via `registered`, exactement comme
+avant, donc jamais de divergence silencieuse pour l'utilisateur qui lit son
+écran.
+
+**Course à la reconnexion, documentée sans détour.** Fenêtre étroite mais
+réelle : si le client se reconnecte (après un reboot, ou un simple rebond
+réseau) avant que le relay n'ait constaté la mort de l'ancienne connexion
+WebSocket (`SessionStore.remove_by_connection`, déclenché à la fermeture
+détectée), le code souhaité apparaît encore occupé par l'enregistrement
+précédent. La nouvelle session obtient alors un code **aléatoire**, comme un
+client pré-adresse-stable. Aucune éviction « intelligente » de l'ancienne
+connexion n'est tentée par construction : permettre à un client de réclamer
+le code d'un autre sur simple déclaration ouvrirait un détournement de
+session pur et simple. C'est donc un repli sûr plutôt qu'un bug — au pire,
+l'utilisateur relit le nouveau code affiché à l'écran et le recommunique à
+l'opérateur.
+
+**Rétrocompatibilité** : même patron que `capabilities` ci-dessus —
+`desired_code` absent, vide ou syntaxiquement invalide, et le relay retombe
+sur le tirage aléatoire ; un ancien relay ignore simplement ce champ inconnu
+et attribue un code aléatoire comme avant.
 
 ### Garde-fou local (politique configurable)
 Le client est lancé avec une politique `--policy auto|confirm|deny` :
@@ -137,7 +200,12 @@ et agrège les `stream`/`result` renvoyés.
 
 ## 3. Codes de session
 - 9 chiffres, format affiché `784 123 678`.
-- TTL court (par défaut 30 min), régénérés à chaque connexion client.
+- TTL court (par défaut 30 min) ; par défaut, un nouveau code est tiré au
+  hasard à chaque connexion client — sauf demande explicite d'adresse stable
+  (`desired_code`, voir §1 « Adresse stable »), auquel cas le même code est
+  redemandé à chaque connexion tant qu'il reste libre. Dans les deux cas, le
+  TTL et la suppression de la session à la déconnexion ne changent pas : seule
+  la valeur du code est stable, jamais la durée de vie de la session.
 - Anti-collision (unicité dans le store), rate-limit sur les tentatives `connect_session`.
 
 ---

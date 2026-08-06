@@ -1,5 +1,6 @@
 """Tests unitaires pour relay.broker : corrélation request_id et erreurs."""
 import asyncio
+import re
 
 import pytest
 
@@ -251,6 +252,45 @@ class TestCapabilitiesRegistration:
         )
         record = await store.get(code)
         assert record.capabilities == ("file_transfer",)
+
+
+class TestDesiredCodeRegistration:
+    """`register_connection` transmet `desired_code` au store (adresse stable).
+
+    Le broker ne fait ici aucune arbitrage : il relaie tel quel au store, qui
+    est seul juge de la validité/disponibilité (cf. `TestInMemorySessionStoreDesiredCode`
+    dans `test_session_store.py`).
+    """
+
+    async def test_register_honors_desired_code_when_free(self, broker, store):
+        conn = FakeConnection()
+        code = await broker.register_connection(
+            conn, os="linux", hostname="h", version="0.3.0", desired_code="784123678"
+        )
+        assert code == "784123678"
+        record = await store.get(code)
+        assert record.connection is conn
+
+    async def test_register_falls_back_when_desired_code_already_taken(self, broker):
+        first_conn = FakeConnection()
+        first_code = await broker.register_connection(
+            first_conn, os="linux", hostname="h1", version="0.3.0", desired_code="111111111"
+        )
+        assert first_code == "111111111"
+
+        second_conn = FakeConnection()
+        second_code = await broker.register_connection(
+            second_conn, os="linux", hostname="h2", version="0.3.0", desired_code="111111111"
+        )
+        assert second_code != "111111111"
+        assert re.fullmatch(r"\d{9}", second_code)
+
+    async def test_register_without_desired_code_argument_is_unaffected(self, broker):
+        # Ancien appelant : l'argument n'existe pas dans sa signature, le
+        # comportement (code aléatoire) reste identique.
+        conn = FakeConnection()
+        code = await broker.register_connection(conn, os="linux", hostname="h", version="0.1.0")
+        assert re.fullmatch(r"\d{9}", code)
 
 
 class TestFileChunkRouting:

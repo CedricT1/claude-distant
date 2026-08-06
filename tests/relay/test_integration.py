@@ -398,6 +398,54 @@ class TestCapabilityAwareClient:
             assert record.capabilities == expected
 
 
+class TestDesiredCodeOverRealWebSocket:
+    """`desired_code` optionnel de `register` (adresse stable, cf. docs/PROTOCOL.md) :
+    honoré quand libre et syntaxiquement valide, repli sûr sinon — jamais de
+    crash ni d'éviction d'une connexion déjà en place sur ce code.
+    """
+
+    async def test_desired_code_is_honored_when_free(self, running_app):
+        _app, port = running_app
+        async with _connect(port) as ws:
+            code = await _register(ws, desired_code="784123678")
+            assert code == "784123678"
+
+    async def test_desired_code_falls_back_when_already_taken(self, running_app):
+        _app, port = running_app
+        async with _connect(port) as first_ws:
+            first_code = await _register(first_ws, desired_code="784123678")
+            assert first_code == "784123678"
+
+            async with _connect(port) as second_ws:
+                second_code = await _register(second_ws, desired_code="784123678")
+                assert second_code != "784123678"
+                assert re.fullmatch(r"\d{9}", second_code)
+
+    @pytest.mark.parametrize(
+        "desired_code",
+        [
+            "12345",  # trop court
+            "1234567890",  # trop long
+            "12345678a",  # non numérique
+            123456789,  # pas une str
+            {"code": "784123678"},  # pas une str
+            None,  # explicitement absent
+        ],
+    )
+    async def test_malformed_desired_code_never_breaks_registration(self, running_app, desired_code):
+        _app, port = running_app
+        async with _connect(port) as ws:
+            code = await _register(ws, desired_code=desired_code)
+            assert re.fullmatch(r"\d{9}", code)
+
+    async def test_legacy_register_without_desired_code_field_is_unaffected(self, running_app):
+        # Ancien client : aucun champ `desired_code` du tout dans le `register`.
+        _app, port = running_app
+        async with _connect(port) as ws:
+            code = await _register(ws)
+            assert re.fullmatch(r"\d{9}", code)
+
+
 class TestFileChunkOverRealWebSocket:
     async def test_file_chunks_are_routed_to_the_pending_request(self, running_app):
         app, port = running_app
