@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"os"
@@ -27,6 +28,13 @@ const (
 	minBackoff        = 1 * time.Second
 	maxBackoff        = 30 * time.Second
 )
+
+// consoleOut is where a live session writes what the operator reads: the
+// session code and the activity journal (consolelog.go). A package-level
+// var, rather than os.Stdout inlined at each call site, so a test can
+// capture that output and assert on it — see main_test.go's session tests.
+// Production never reassigns it.
+var consoleOut io.Writer = os.Stdout
 
 // config holds the fully-resolved client configuration, whatever the source
 // (flag, environment variable, or compiled-in buildDefaults) of each value.
@@ -304,12 +312,16 @@ func runSession(ctx context.Context, cfg config, ws *Workspace) error {
 
 	stdin := bufio.NewReader(os.Stdin)
 	confirmFn := func(command string) (bool, bool) { return PromptConfirm(stdin, command) }
-	// events is nil here: the console entry point (this file) has no
-	// activity log to feed and must not gain any stdout noise from one —
-	// a non-regression this package's tests pin down explicitly. The GUI
-	// entry point (client/gui.go, out of this task's scope) is expected to
-	// build its own Executor with a non-nil sink instead.
-	executor := NewExecutor(conn, NewPolicyController(cfg.policy), confirmFn, ws.Dir(), nil)
+	// The console gets the same live journal as the GUI's log panel, printed
+	// to stdout (consolelog.go). This sink used to be nil — "the console
+	// must add no output of its own" — but that made sense only while
+	// `confirm` was the default and every sensitive command announced itself
+	// through its prompt. Under `auto` (main.go's default now), nothing else
+	// on this terminal names the command the harness just ran: the commands'
+	// own stdout/stderr is streamed to the relay, not printed here. The
+	// Executor still accepts a nil sink (executor.go:emit), which is what
+	// every test that predates this passes.
+	executor := NewExecutor(conn, NewPolicyController(cfg.policy), confirmFn, ws.Dir(), NewConsoleActivityLog(consoleOut).Append)
 
 	go heartbeatLoop(sessionCtx, conn)
 
@@ -389,14 +401,18 @@ func heartbeatLoop(ctx context.Context, conn *Conn) {
 }
 
 // printSessionCode displays the 9-digit session code grouped as "784 123 678"
-// so the local user can read it out to the operator.
+// so the local user can read it out to the operator, followed by the header
+// of the activity journal the client prints from then on (consolelog.go) —
+// without it, the first `[command]` line would appear with no explanation of
+// what it is.
 func printSessionCode(code string) {
-	fmt.Println()
-	fmt.Println("========================================")
-	fmt.Printf("  Code de session : %s\n", formatSessionCode(code))
-	fmt.Println("  Communiquez ce code à l'opérateur.")
-	fmt.Println("========================================")
-	fmt.Println()
+	fmt.Fprintln(consoleOut)
+	fmt.Fprintln(consoleOut, "========================================")
+	fmt.Fprintf(consoleOut, "  Code de session : %s\n", formatSessionCode(code))
+	fmt.Fprintln(consoleOut, "  Communiquez ce code à l'opérateur.")
+	fmt.Fprintln(consoleOut, "========================================")
+	fmt.Fprintln(consoleOut)
+	fmt.Fprintln(consoleOut, "Journal d'activité — chaque commande reçue du harnais s'affiche ici :")
 }
 
 // formatSessionCode groups a 9-digit code as "XXX XXX XXX". Non-digit

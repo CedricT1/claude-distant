@@ -126,11 +126,52 @@ Au démarrage, le client :
 1. se connecte au relay et envoie `register` (OS détecté, hostname, version) ;
 2. affiche le code de session reçu (`registered`), formaté `784 123 678` ;
 3. exécute en boucle les `command` reçus (`run_shell`, `run_command`,
-   `system_info`), streame stdout/stderr, puis renvoie `result` ;
+   `system_info`), streame stdout/stderr, puis renvoie `result`, en
+   journalisant chaque requête reçue à l'écran (voir « Journal d'activité »
+   ci-dessous) ;
 4. envoie un `heartbeat` toutes les 20 s ;
 5. se reconnecte automatiquement (backoff exponentiel + jitter, 1s→30s) si la
    connexion tombe, jusqu'à interruption (Ctrl-C / SIGTERM), gérée
    proprement (fermeture de la connexion WebSocket puis arrêt).
+
+### Journal d'activité (console)
+
+Le client console affiche, sous le code de session, une ligne par événement :
+chaque commande reçue du harnais **avec son contenu**, puis les
+lectures/écritures de fichiers, les décisions d'approbation et les résultats.
+C'est le pendant console du panneau « Journal d'activité » de la GUI, au même
+format (`commanddetail.go:describeCommand`, `consolelog.go`) :
+
+```
+========================================
+  Code de session : 784 123 678
+  Communiquez ce code à l'opérateur.
+========================================
+
+Journal d'activité — chaque commande reçue du harnais s'affiche ici :
+13:21:31 [command] system_info (request a1b2)
+13:21:31 [result] request a1b2: exit=0
+13:21:33 [command] run_shell : uname -a [timeout=30s] (request c3d4)
+13:21:33 [result] request c3d4: exit=0
+13:21:34 [command] read_file : /etc/hostname (request e5f6)
+13:21:34 [file_read] /etc/hostname (3 octets)
+13:21:34 [result] request e5f6: exit=0
+```
+
+Sans ce journal, un client lancé avec la politique `auto` (le défaut)
+n'afficherait rien du tout de ce que fait le harnais : la sortie des
+commandes est streamée vers le relay, pas vers ce terminal, et aucune invite
+de confirmation ne vient les annoncer. Détails de rendu :
+
+- une commande multi-lignes tient sur une seule ligne, les sauts de ligne
+  étant rendus par un `\n` littéral (les coller sur une même ligne avec un
+  simple espace ferait lire deux commandes comme une seule) ;
+- les caractères de contrôle sont retirés (une séquence ANSI reçue du harnais
+  ne doit pas piloter le terminal de l'utilisateur) ;
+- au-delà de 400 caractères, la commande est tronquée avec un marqueur
+  indiquant combien de caractères ont été coupés ;
+- le **contenu** d'un `write_file` n'est jamais journalisé, seulement sa
+  taille — même choix que l'audit du relay, qui rédige `content_base64`.
 
 ### Politique de garde-fou (`--policy`)
 
@@ -289,6 +330,7 @@ c'est parti, sans terminal à ouvrir.
 | `policy.go` | garde-fou local : classification destructive, invite `confirm`, `PolicyController` (bascule `auto`/`confirm` à chaud, utilisé par la GUI) |
 | `activitylog.go` | `ActivityLog` : journal d'activité borné, thread-safe, alimente le panneau « journal » de la GUI et le bouton « Enregistrer le log… » |
 | `commanddetail.go` | rendu d'une commande reçue en une ligne de journal lisible (`describeCommand`) : résumé par outil, repli sur une ligne, retrait des caractères de contrôle, troncature marquée |
+| `consolelog.go` | `ConsoleActivityLog` : pendant console du panneau « journal » de la GUI — écrit chaque événement sur la sortie standard, sérialisé entre goroutines |
 | `protocol.go` | types Go des messages du protocole |
 | `workspace.go` | répertoire de travail temporaire dédié (`NewWorkspace`/`Cleanup`), « sans résidu » |
 | `lifecycle.go` | `RunGuarded` : garantit le nettoyage à la sortie, y compris sur panic |

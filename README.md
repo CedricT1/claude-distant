@@ -113,7 +113,10 @@ aucune confirmation demandée ; `confirm` valide chaque opération sensible), `-
 (supprime le binaire à l'arrêt propre). Équivalents en variables d'environnement :
 `CLAUDE_DISTANT_URL`, `CLAUDE_DISTANT_TOKEN`, `CLAUDE_DISTANT_POLICY`, `CLAUDE_DISTANT_REMOVE_ON_EXIT`.
 
-Le client affiche un code unique à 9 chiffres.
+Le client affiche un code unique à 9 chiffres, puis journalise à l'écran
+chaque commande reçue du harnais (variante console comme variante GUI, où le
+panneau « Journal d'activité » offre en plus un filtre « commandes du harnais
+uniquement » et l'enregistrement du journal dans un fichier).
 
 ### 4. Connecter Claude (harness)
 

@@ -38,8 +38,10 @@ func TestDescribeCommand_CollapsesMultilineScriptToOneLine(t *testing.T) {
 	if strings.ContainsAny(got, "\r\n\t") {
 		t.Errorf("describeCommand = %q, want a single line (no CR/LF/TAB)", got)
 	}
-	if !strings.Contains(got, "echo un echo deux echo trois") {
-		t.Errorf("describeCommand = %q, want whitespace runs collapsed to single spaces", got)
+	// A line break must stay visible as such: collapsed to a plain space,
+	// two commands would read as one command with extra arguments.
+	if !strings.Contains(got, `echo un \n echo deux \n echo trois`) {
+		t.Errorf("describeCommand = %q, want line breaks marked and other whitespace collapsed", got)
 	}
 }
 

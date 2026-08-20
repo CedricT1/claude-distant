@@ -20,12 +20,13 @@ import (
 const maxLoggedDetailRunes = 400
 
 // describeCommand renders one inbound `command` message as a single
-// human-readable line for the GUI's activity log (client/gui.go). This is
-// what makes the window answer "what is the harness doing right now?": the
-// tool name alone (all this event used to carry) says a run_shell happened,
-// not *which* command ran — and under the default `auto` policy no
-// confirmation dialog shows it either, so the log is the only place the
-// operator can see it.
+// human-readable line for the activity journal — the GUI's log panel
+// (client/gui.go) and the console client's stdout (client/consolelog.go)
+// alike. This is what makes either variant answer "what is the harness doing
+// right now?": the tool name alone (all this event used to carry) says a
+// run_shell happened, not *which* command ran — and under the default `auto`
+// policy no confirmation prompt shows it either, so the journal is the only
+// place the operator can see it.
 //
 // The shape is "<outil> : <résumé> (request <id>)", the request id last
 // because it only matters when correlating with the relay's audit trail.
@@ -162,31 +163,43 @@ func rawParamsSummary(params json.RawMessage) string {
 	return sanitizeLogLine(string(params))
 }
 
+// lineBreakMarker stands in for a run of line breaks inside a one-line log
+// entry. A plain space would be actively misleading — a two-command script
+// would read as one command with extra arguments — and the literal two
+// characters `\n` say "there was a newline here" on any terminal and in any
+// text editor, unlike a Unicode pilcrow or return symbol that a Windows
+// console in a legacy code page would render as mojibake.
+const lineBreakMarker = ` \n `
+
 // sanitizeLogLine folds an arbitrary string from the harness into something
-// safe to append to a one-line log entry: every whitespace run (newlines and
-// tabs of a multi-line script included) collapses to a single space, other
+// safe to append to a one-line log entry: runs of line breaks become
+// lineBreakMarker, other whitespace runs collapse to a single space, other
 // control characters — which could otherwise garble a terminal or the saved
 // log file — are dropped, and the result is truncated to
 // maxLoggedDetailRunes with a marker stating how many characters were cut.
 func sanitizeLogLine(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
-	pendingSpace := false
+	// Both pending flags stay false until something has been written, which
+	// drops leading whitespace; neither is ever flushed at the end, which
+	// drops trailing whitespace. No Trim pass needed.
+	pendingSpace, pendingBreak := false, false
 	for _, r := range s {
 		switch {
+		case r == '\n' || r == '\r':
+			pendingBreak = b.Len() > 0
 		case unicode.IsSpace(r):
-			// Collapse instead of emitting: leading whitespace is dropped
-			// (nothing written yet) and trailing whitespace never gets
-			// flushed, so no Trim pass is needed afterwards.
 			pendingSpace = b.Len() > 0
 		case r == utf8.RuneError || unicode.IsControl(r):
 			// Skip: not printable, and a stray CSI sequence must not reach
 			// a terminal that renders the saved log.
 		default:
-			if pendingSpace {
+			if pendingBreak {
+				b.WriteString(lineBreakMarker)
+			} else if pendingSpace {
 				b.WriteRune(' ')
-				pendingSpace = false
 			}
+			pendingSpace, pendingBreak = false, false
 			b.WriteRune(r)
 		}
 	}

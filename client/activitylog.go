@@ -126,6 +126,17 @@ func renderActivityLineFull(e ActivityEvent) string {
 	return fmt.Sprintf("%s [%s] %s", e.Time.Format(time.RFC3339), e.Kind, e.Detail)
 }
 
+// renderActivityLine is renderActivityLineFull's compact form, for the two
+// live views — the GUI's log panel (client/gui.go) and the console client's
+// stdout journal (client/consolelog.go). Same fields, same order, timestamp
+// abbreviated to the time of day: that buys ~15 columns for what the
+// operator actually came to read (the command itself) and loses nothing,
+// since a session lasts minutes and both the GUI's detail dialog and the
+// saved file keep the absolute timestamp.
+func renderActivityLine(e ActivityEvent) string {
+	return fmt.Sprintf("%s [%s] %s", e.Time.Format("15:04:05"), e.Kind, e.Detail)
+}
+
 // Subscribe registers fn to be called, from within Append, every time a new
 // event is recorded — how the GUI keeps its live log panel in sync without
 // polling. fn is invoked synchronously on the appending goroutine's call to

@@ -441,18 +441,6 @@ func (g *guiState) showLogEntry(id widget.ListItemID) {
 	d.Show()
 }
 
-// renderActivityLine formats one ActivityEvent for the live log panel: same
-// fields, same order as ActivityLog.Render()'s saved-file lines
-// (activitylog.go), with the timestamp abbreviated to the time of day. That
-// one deliberate difference buys ~15 characters of row width for what the
-// operator actually came to read — the command itself — and loses nothing:
-// a session lasts minutes, so the date is redundant on screen, and both the
-// detail dialog (showLogEntry) and the saved file keep the full RFC3339
-// timestamp.
-func renderActivityLine(e ActivityEvent) string {
-	return fmt.Sprintf("%s [%s] %s", e.Time.Format("15:04:05"), e.Kind, e.Detail)
-}
-
 // setStatus updates the connection-status label. Must be called from the
 // Fyne UI goroutine (i.e. wrapped in fyne.Do by every caller outside build).
 func (g *guiState) setStatus(status string) {
