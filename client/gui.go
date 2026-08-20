@@ -213,8 +213,25 @@ type guiState struct {
 	identityLabel *widget.Label
 	warningRow    fyne.CanvasObject
 
-	logList  *widget.List
-	logLines []string // touched only on the Fyne UI goroutine (widget callbacks, or via fyne.Do) — no separate mutex needed, see build().
+	logList *widget.List
+	// logEvents is every event the window has received (bounded exactly like
+	// the ActivityLog it mirrors), logLines the subset currently displayed
+	// — the two differ as soon as "commandes du harnais uniquement" is
+	// ticked. Both are touched only on the Fyne UI goroutine (widget
+	// callbacks, or via fyne.Do), so no separate mutex is needed; see
+	// build().
+	logEvents []ActivityEvent
+	// logShown / logLines are the displayed subset, kept index-aligned: the
+	// list renders logLines[i], and a tap on row i opens logShown[i] in the
+	// detail dialog (which shows the full RFC3339 line the compact row
+	// abbreviates).
+	logShown []ActivityEvent
+	logLines []string
+	// commandsOnly filters the panel down to what the harness asked for
+	// (ActivityCommand), hiding the approvals/results/connection chatter
+	// around it. It changes the VIEW only: logEvents keeps everything, and
+	// "Enregistrer le log…" still writes the whole journal.
+	commandsOnly bool
 
 	fullScreen bool
 	expandBtn  *widget.Button
@@ -283,11 +300,28 @@ func (g *guiState) build(initialAuto bool) {
 	// event — see the Subscribe callback below.
 	g.logList = widget.NewList(
 		func() int { return len(g.logLines) },
-		func() fyne.CanvasObject { return widget.NewLabel("") },
+		func() fyne.CanvasObject {
+			l := widget.NewLabel("")
+			// Monospace: these lines are mostly shell commands and paths,
+			// which are read character by character. Truncation rather than
+			// wrapping: widget.List lays out uniform-height rows, so a
+			// wrapped line would be clipped mid-height instead of growing
+			// the row — a command wider than the window stays fully
+			// readable through the detail dialog below (OnSelected).
+			l.TextStyle = fyne.TextStyle{Monospace: true}
+			l.Truncation = fyne.TextTruncateEllipsis
+			return l
+		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			obj.(*widget.Label).SetText(g.logLines[id])
 		},
 	)
+	g.logList.OnSelected = func(id widget.ListItemID) {
+		g.showLogEntry(id)
+		// A log row is a thing to read, not a selection to keep: clear it
+		// so the same row can be tapped again right away.
+		g.logList.Unselect(id)
+	}
 
 	g.expandBtn = widget.NewButtonWithIcon("Agrandir", theme.ViewFullScreenIcon(), func() {
 		g.fullScreen = !g.fullScreen
@@ -301,22 +335,26 @@ func (g *guiState) build(initialAuto bool) {
 	saveBtn := widget.NewButtonWithIcon("Enregistrer le log…", theme.DocumentSaveIcon(), func() {
 		g.saveLog()
 	})
-	logToolbar := container.NewHBox(g.expandBtn, saveBtn)
-	logPane := container.NewBorder(container.NewHBox(widget.NewLabelWithStyle("Journal d'activité", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), logToolbar), nil, nil, nil, g.logList)
+	commandsOnlyCheck := widget.NewCheck("Commandes du harnais uniquement", func(checked bool) {
+		g.commandsOnly = checked
+		g.rebuildLogLines()
+	})
+	logToolbar := container.NewHBox(g.expandBtn, saveBtn, commandsOnlyCheck)
+	logHeader := container.NewHBox(widget.NewLabelWithStyle("Journal d'activité", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), logToolbar)
+	logPane := container.NewBorder(logHeader, nil, nil, nil, g.logList)
 
 	// Seed from anything already logged (empty for a fresh ActivityLog
 	// today, but Events() is the documented way to read a backlog, and
 	// keeping this general costs nothing).
-	for _, e := range g.activityLog.Events() {
-		g.logLines = append(g.logLines, renderActivityLine(e))
-	}
+	g.logEvents = append(g.logEvents, g.activityLog.Events()...)
+	g.rebuildLogLines()
+
 	g.activityLog.Subscribe(func(e ActivityEvent) {
-		line := renderActivityLine(e)
-		fyne.Do(func() {
-			g.logLines = append(g.logLines, line)
-			g.logList.Refresh()
-			g.logList.ScrollToBottom()
-		})
+		// Subscribe fires on whichever goroutine emitted the event (an
+		// Executor command goroutine), so every touch of the widgets and of
+		// logEvents/logLines is queued onto the Fyne UI goroutine here —
+		// that single-threading is what lets those slices go unguarded.
+		fyne.Do(func() { g.appendLogEvent(e) })
 	})
 
 	split := container.NewVSplit(top, logPane)
@@ -325,11 +363,94 @@ func (g *guiState) build(initialAuto bool) {
 	g.window.SetContent(split)
 }
 
-// renderActivityLine formats one ActivityEvent for the live log panel, in
-// the same layout as ActivityLog.Render()'s saved-file lines (activitylog.go)
-// so what's on screen and what "Enregistrer le log…" writes always agree.
+// appendLogEvent records one new event and, if the current filter shows it,
+// puts it on screen. Must run on the Fyne UI goroutine.
+//
+// logEvents is bounded exactly like the ActivityLog it mirrors: a window
+// left open across a long session (or many reconnects) must not accumulate
+// events the log itself has already evicted.
+func (g *guiState) appendLogEvent(e ActivityEvent) {
+	g.logEvents = append(g.logEvents, e)
+	if over := len(g.logEvents) - activityLogCapacity; over > 0 {
+		g.logEvents = append(g.logEvents[:0:0], g.logEvents[over:]...)
+		// Eviction shifts every index, so the displayed subset is rebuilt
+		// wholesale rather than patched — it happens once per event only
+		// after a full session's worth of activity.
+		g.rebuildLogLines()
+		return
+	}
+	if !g.showsEvent(e) {
+		return
+	}
+	g.logShown = append(g.logShown, e)
+	g.logLines = append(g.logLines, renderActivityLine(e))
+	g.logList.Refresh()
+	g.logList.ScrollToBottom()
+}
+
+// rebuildLogLines recomputes the displayed lines from logEvents under the
+// current filter — what the "commandes du harnais uniquement" checkbox and
+// an eviction both need. Must run on the Fyne UI goroutine.
+func (g *guiState) rebuildLogLines() {
+	g.logShown = g.logShown[:0]
+	g.logLines = g.logLines[:0]
+	for _, e := range g.logEvents {
+		if g.showsEvent(e) {
+			g.logShown = append(g.logShown, e)
+			g.logLines = append(g.logLines, renderActivityLine(e))
+		}
+	}
+	g.logList.Refresh()
+	if len(g.logLines) > 0 {
+		g.logList.ScrollToBottom()
+	}
+}
+
+// showsEvent reports whether e belongs in the panel under the current
+// filter. Unfiltered, everything shows; filtered, only what the harness
+// asked this client to do (executor.go emits exactly one ActivityCommand
+// per inbound `command` message, so the filtered view is a faithful,
+// one-line-per-request list of the harness's orders).
+func (g *guiState) showsEvent(e ActivityEvent) bool {
+	return !g.commandsOnly || e.Kind == ActivityCommand
+}
+
+// showLogEntry opens one log line in a dialog, where it can be read in full
+// (wrapped over as many lines as it needs, unlike the truncated list row)
+// and copied. Must run on the Fyne UI goroutine — OnSelected already does.
+func (g *guiState) showLogEntry(id widget.ListItemID) {
+	if id < 0 || id >= len(g.logShown) {
+		return // the list was rebuilt (filter toggled, eviction) under the tap
+	}
+	// The full line, dated: this dialog is where a long command gets read in
+	// full and copied out (into a report, a ticket), so it carries the same
+	// text as the saved log rather than the row's abbreviated form.
+	line := renderActivityLineFull(g.logShown[id])
+
+	text := widget.NewLabel(line)
+	text.TextStyle = fyne.TextStyle{Monospace: true}
+	text.Wrapping = fyne.TextWrapWord
+
+	d := dialog.NewCustomWithoutButtons("Détail", container.NewVScroll(text), g.window)
+	copyBtn := widget.NewButtonWithIcon("Copier", theme.ContentCopyIcon(), func() {
+		g.window.Clipboard().SetContent(line)
+	})
+	closeBtn := widget.NewButton("Fermer", func() { d.Hide() })
+	d.SetButtons([]fyne.CanvasObject{copyBtn, closeBtn})
+	d.Resize(fyne.NewSize(600, 260))
+	d.Show()
+}
+
+// renderActivityLine formats one ActivityEvent for the live log panel: same
+// fields, same order as ActivityLog.Render()'s saved-file lines
+// (activitylog.go), with the timestamp abbreviated to the time of day. That
+// one deliberate difference buys ~15 characters of row width for what the
+// operator actually came to read — the command itself — and loses nothing:
+// a session lasts minutes, so the date is redundant on screen, and both the
+// detail dialog (showLogEntry) and the saved file keep the full RFC3339
+// timestamp.
 func renderActivityLine(e ActivityEvent) string {
-	return fmt.Sprintf("%s [%s] %s", e.Time.Format(time.RFC3339), e.Kind, e.Detail)
+	return fmt.Sprintf("%s [%s] %s", e.Time.Format("15:04:05"), e.Kind, e.Detail)
 }
 
 // setStatus updates the connection-status label. Must be called from the

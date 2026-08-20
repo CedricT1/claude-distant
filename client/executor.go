@@ -218,7 +218,12 @@ func (e *Executor) emit(kind ActivityKind, detail string) {
 // sends a final `result` message, even when the tool name is unknown or
 // params fail to decode.
 func (e *Executor) Handle(ctx context.Context, cmd CommandMessage) {
-	e.emit(ActivityCommand, fmt.Sprintf("%s (request %s)", cmd.Tool, cmd.RequestID))
+	// describeCommand (commanddetail.go), not just the tool name: the
+	// activity log is where the operator watches what the harness is doing,
+	// and "run_shell" alone doesn't say WHICH command is about to run —
+	// especially under the default `auto` policy, where no confirmation
+	// dialog shows it either.
+	e.emit(ActivityCommand, describeCommand(cmd))
 	switch cmd.Tool {
 	case "run_shell":
 		e.runShellOrCommand(ctx, cmd, true)

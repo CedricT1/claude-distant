@@ -243,10 +243,31 @@ console, sous une autre forme :
   session, comme en console).
 - **Journal d'activité** : en bas de fenêtre, le journal d'activité en
   direct (connexions, commandes, lectures/écritures de fichiers,
-  approbations, résultats), redimensionnable à la souris, avec un bouton
-  « Agrandir » (bascule vue réduite / plein écran) et un bouton
-  « Enregistrer le log… » qui écrit l'historique complet de la session dans
-  un fichier choisi par l'utilisateur.
+  approbations, résultats), redimensionnable à la souris. Chaque commande
+  reçue du harnais y est affichée **avec son contenu** — la commande shell
+  elle-même, le chemin lu ou écrit — et non le seul nom de l'outil
+  (`commanddetail.go:describeCommand`) : c'est ce qui permet de voir ce que
+  fait le harnais, en particulier sous la politique `auto` par défaut, où
+  aucune boîte de confirmation ne l'affiche plus. Détails :
+  - une ligne par requête : `13:42:07 [command] run_shell : systemctl status
+    nginx [timeout=30s] (request a1b2)` ;
+  - une commande multi-lignes est repliée sur une seule ligne, les caractères
+    de contrôle sont retirés, et une commande très longue est tronquée avec
+    un marqueur indiquant combien de caractères ont été coupés ;
+  - le **contenu** d'un `write_file` n'est jamais journalisé, seulement sa
+    taille — même choix que l'audit du relay, qui rédige `content_base64` ;
+  - **clic sur une ligne** : ouvre le détail complet (horodatage absolu,
+    texte replié sur plusieurs lignes) avec un bouton « Copier » ;
+  - case **« Commandes du harnais uniquement »** : filtre le journal sur les
+    seules requêtes reçues, en masquant approbations, résultats et messages
+    de connexion. C'est un filtre d'*affichage* : rien n'est perdu, décocher
+    la case fait tout réapparaître, et « Enregistrer le log… » écrit de
+    toute façon l'historique complet ;
+  - bouton « Agrandir » (bascule vue réduite / plein écran) et bouton
+    « Enregistrer le log… » qui écrit l'historique complet de la session
+    dans un fichier choisi par l'utilisateur (horodatages RFC3339 complets,
+    là où l'affichage se limite à l'heure pour laisser la place à la
+    commande).
 
 Le binaire GUI accepte les mêmes flags/variables d'environnement que la
 console (tableau ci-dessus), y compris le lancement sans argument d'un
@@ -267,6 +288,7 @@ c'est parti, sans terminal à ouvrir.
 | `proc_linux.go`, `proc_windows.go` | démarrage/arrêt de l'arbre de processus par OS |
 | `policy.go` | garde-fou local : classification destructive, invite `confirm`, `PolicyController` (bascule `auto`/`confirm` à chaud, utilisé par la GUI) |
 | `activitylog.go` | `ActivityLog` : journal d'activité borné, thread-safe, alimente le panneau « journal » de la GUI et le bouton « Enregistrer le log… » |
+| `commanddetail.go` | rendu d'une commande reçue en une ligne de journal lisible (`describeCommand`) : résumé par outil, repli sur une ligne, retrait des caractères de contrôle, troncature marquée |
 | `protocol.go` | types Go des messages du protocole |
 | `workspace.go` | répertoire de travail temporaire dédié (`NewWorkspace`/`Cleanup`), « sans résidu » |
 | `lifecycle.go` | `RunGuarded` : garantit le nettoyage à la sortie, y compris sur panic |

@@ -109,9 +109,21 @@ func (l *ActivityLog) Render() string {
 	}
 	var b strings.Builder
 	for _, e := range events {
-		fmt.Fprintf(&b, "%s [%s] %s\n", e.Time.Format(time.RFC3339), e.Kind, e.Detail)
+		b.WriteString(renderActivityLineFull(e))
+		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+// renderActivityLineFull renders one event with its absolute RFC3339
+// timestamp: the form used wherever the line has to stand on its own —
+// the saved log file (Render, above) and the GUI's per-entry detail dialog
+// (client/gui.go:showLogEntry), both of which can be read days later or
+// pasted into a report. The live panel abbreviates the same line to the
+// time of day, where horizontal space is scarce and the date is whatever
+// today is; see renderActivityLine (client/gui.go).
+func renderActivityLineFull(e ActivityEvent) string {
+	return fmt.Sprintf("%s [%s] %s", e.Time.Format(time.RFC3339), e.Kind, e.Detail)
 }
 
 // Subscribe registers fn to be called, from within Append, every time a new

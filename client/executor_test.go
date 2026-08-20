@@ -689,6 +689,27 @@ func TestExecutor_Handle_EmitsCommandReceivedEventFirst(t *testing.T) {
 	}
 }
 
+// The command event must carry the command itself, not just the tool that
+// carried it: it is what the GUI's activity log shows the operator, and
+// under the default `auto` policy nothing else on screen reveals what the
+// harness asked for. See describeCommand (commanddetail.go).
+func TestExecutor_Handle_CommandEventCarriesTheCommandItself(t *testing.T) {
+	rec := &eventRecorder{}
+	conn, recv := newLoopbackConn(t)
+	e := NewExecutor(conn, NewPolicyController(PolicyAuto), nil, "", rec.record)
+
+	e.Handle(context.Background(), fileCommand(t, "r1", "run_shell", map[string]any{"command": "echo bonjour"}))
+	collectUntilResult(t, recv)
+
+	events := rec.all()
+	if len(events) == 0 || events[0].Kind != ActivityCommand {
+		t.Fatalf("first event = %+v, want an ActivityCommand", events)
+	}
+	if !strings.Contains(events[0].Detail, "echo bonjour") {
+		t.Errorf("command event detail = %q, want it to carry the command text", events[0].Detail)
+	}
+}
+
 func TestExecutor_ResolveApproval_EmitsRequestAndDecisionEvents(t *testing.T) {
 	rec := &eventRecorder{}
 	confirm := &recordingConfirm{approve: true}
