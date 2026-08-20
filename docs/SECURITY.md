@@ -14,9 +14,11 @@ Voir aussi [`docs/PLAN.md`](PLAN.md) (phases) et [`docs/PROTOCOL.md`](PROTOCOL.m
 `claude-distant` est, par construction, **un exécuteur de commandes à
 distance privilégié** : le relay reçoit des instructions d'un harnais IA
 (Claude) et les fait exécuter sur un PC tiers via un client qui s'y connecte
-volontairement. C'est un usage **autorisé et supervisé uniquement**
-(l'utilisateur du PC distant partage explicitement un code de session et
-approuve les actions destructives localement) — pas un outil d'accès furtif.
+volontairement. C'est un usage **autorisé et supervisé uniquement** : l'utilisateur du PC
+distant lance lui-même le client et partage explicitement un code de session
+— c'est ce partage, et non l'approbation commande par commande (désactivée
+par défaut depuis le passage de `--policy` à `auto`, §1ter (d)), qui porte le
+consentement. Pas un outil d'accès furtif.
 
 Surfaces d'attaque principales et mitigations correspondantes :
 
@@ -25,7 +27,7 @@ Surfaces d'attaque principales et mitigations correspondantes :
 | Interception réseau (MITM) sur le canal client↔relay ou harnais↔relay | TLS obligatoire en production (§2) ; `wss://` côté client, reverse proxy TLS devant `/mcp` |
 | Vol/fuite du jeton Bearer du harnais | Jetons **scopés** à durée de vie courte (mode oauth, §3) plutôt qu'un jeton statique unique à privilèges illimités ; rotation facile (réémission), jamais de secret en dur (§4) |
 | Réutilisation d'une connexion client compromise pour usurper une autre session | Jetons client `per_session` à usage unique, consommés au premier `register` réussi (`relay/auth.py:PerSessionTokenStore`) |
-| Commande destructive exécutée sans consentement de l'utilisateur du PC distant | Garde-fou local configurable (`auto`/`confirm`/`deny`, côté client) + politique serveur (allow/denylist, quotas — `relay/command_policy.py`) |
+| Commande destructive exécutée sans consentement de l'utilisateur du PC distant | Garde-fou local configurable (`auto`/`confirm`/`deny`, côté client — **`auto` par défaut**, voir §1ter (d)) + politique serveur (allow/denylist, quotas — `relay/command_policy.py`), cette dernière restant active quelle que soit la politique locale |
 | Session compromise ou comportement suspect détecté en cours d'usage | Kill-switch (`terminate_session`, outil MCP + `Broker.terminate_session`) : invalide immédiatement la session et ferme la connexion WS |
 | Répudiation / contestation a posteriori d'une commande exécutée | Journal d'audit JSONL **chaîné par hash** (`relay/audit.py`), falsification détectable (`verify_chain`) |
 | Un harnais compromis ou mal scopé outrepasse son rôle (ex. appelle `terminate_session` alors qu'il ne devrait que lire `system_info`) | Scopes MCP par outil en mode oauth (§3) — principe du moindre privilège par jeton émis |
@@ -75,12 +77,13 @@ ce canal, ou compromission du poste opérateur du harnais — ce sont les
 frontières de confiance du système, pas des failles qu'un durcissement du
 relay peut combler.
 
-## 1ter. Personnalisation à la compilation, adresse stable, GUI
+## 1ter. Personnalisation à la compilation, adresse stable, GUI, défaut `auto`
 
-Trois entrées supplémentaires au modèle de menace, introduites par la
-personnalisation à la compilation, l'adresse stable et le client graphique
-(Fyne). À prendre au sérieux : aucune n'est un bug, toutes les trois sont des
-compromis assumés dont l'utilisateur/déployeur doit connaître le prix.
+Quatre entrées supplémentaires au modèle de menace, introduites par la
+personnalisation à la compilation, l'adresse stable, le client graphique
+(Fyne) et le passage du garde-fou local à `auto` par défaut. À prendre au
+sérieux : aucune n'est un bug, toutes les quatre sont des compromis assumés
+dont l'utilisateur/déployeur doit connaître le prix.
 
 - **(a) Le binaire distribué EST lui-même un secret.** Un `RELAY_URL`, un
   `CLIENT_TOKEN` ou un `IDENTITY_SECRET` compilés dans un binaire personnalisé
@@ -141,6 +144,38 @@ compromis assumés dont l'utilisateur/déployeur doit connaître le prix.
   un harnais compromis ou mal aiguillé — exactement le même compromis que
   `--policy auto` en console, rendu plus accessible et donc plus facile à
   activer sans y réfléchir.
+
+- **(d) La politique de garde-fou par défaut est `auto` : aucune commande
+  n'est soumise à confirmation locale tant que l'opérateur n'a rien
+  demandé.** Le défaut historique était `confirm` (invite locale pour chaque
+  commande classée destructive, et pour chaque `read_file`/`write_file`) ; il
+  est passé à `auto` parce qu'en pratique une session d'administration
+  enchaîne des dizaines d'opérations et qu'une invite par opération rendait
+  le canal inutilisable. Le prix, à connaître : **sur un client lancé sans
+  `--policy`, la dernière ligne de défense locale n'est pas active** — un
+  `rm -rf`, un `shutdown` ou un `read_file /etc/shadow` envoyé par un harnais
+  compromis, mal aiguillé (mauvais code de session) ou simplement trop
+  confiant s'exécute sans que l'utilisateur du PC ait un mot à dire, exactement
+  comme le décrit le point (c) pour le mode automatique de la GUI, mais sans
+  qu'il ait fallu cocher quoi que ce soit. Ce qui reste en place, et sur quoi
+  s'appuie donc désormais l'essentiel de la protection :
+  - le **consentement d'entrée** (le client est lancé volontairement, le code
+    de session est communiqué volontairement, la session est éphémère) ;
+  - la **politique serveur** (`relay/command_policy.py` : allow/denylist sur
+    les commandes *et* les chemins, quotas par session), indépendante du
+    client et non désactivable depuis lui — c'est le levier à configurer pour
+    un déploiement qui veut une limite dure ;
+  - les **scopes MCP** par outil (§3) et le **kill-switch**
+    (`terminate_session`) ;
+  - l'**audit chaîné** (`relay/audit.py`), qui reste exhaustif.
+
+  Un déploiement qui veut conserver l'ancien comportement le rétablit sans
+  recompiler : `--policy confirm` (ou `CLAUDE_DISTANT_POLICY=confirm`), et
+  `--policy deny` pour un refus systématique. La variante GUI expose le même
+  choix à la volée via son interrupteur « mode automatique » — désormais
+  coché au démarrage, avertissement affiché, décochable à tout moment. En
+  console, le client annonce explicitement le mode automatique au démarrage,
+  pour qu'il ne soit jamais actif à l'insu de l'utilisateur.
 
 ## 2. TLS strict (terminaison externe)
 

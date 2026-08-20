@@ -10,7 +10,7 @@ Accès distant piloté par un harnais IA (Claude) pour l'administration système
 - Le PC distant n'ouvre **aucun port entrant** : seule connexion **sortante** WebSocket/TLS vers le relay
 - Client **portable, sans installation, sans résidu** : binaire unique lancé depuis un dossier temporaire, auto-nettoyage à la fermeture — en variante console (par défaut) ou GUI (fenêtre Fyne, postes de bureau), voir `client/README.md`
 - Sessions **éphémères** : codes 9 chiffres à durée de vie courte (30 min par défaut) ; le *code* peut être rendu stable d'une reconnexion à l'autre (adresse dérivée de la machine), sans changer la durée de vie de la session — voir `docs/PROTOCOL.md`
-- **Consentement explicite** : l'utilisateur voit le code et approuve les commandes sensibles selon la politique locale
+- **Consentement explicite** : l'utilisateur voit le code de session et décide de le communiquer — c'est là que se joue le consentement. Le garde-fou local par commande est, lui, configurable : `--policy auto` (défaut, exécution sans invite), `confirm` (approbation opération par opération) ou `deny`
 
 ## Architecture
 
@@ -38,7 +38,7 @@ Accès distant piloté par un harnais IA (Claude) pour l'administration système
 4. **Connexion du harness** : Claude utilise l'outil MCP `connect_session(code)` pour s'authentifier auprès du relay
 5. **Exécution de commandes** : Claude exécute des tâches via les outils MCP (`system_info`, `run_shell`, etc.) ; le relay les route au client
 6. **Transfert de fichiers** : `read_file` rapatrie un fichier de la machine distante, `write_file` en dépose un (base64 + SHA-256, 8 MiB max, écriture atomique) — réservés aux clients déclarant la capacité `file_transfer`
-7. **Garde-fou local** : pour les commandes destructives — et *systématiquement* pour `read_file`/`write_file` — le client demande confirmation localement selon la politique (`auto` / `confirm` / `deny`)
+7. **Garde-fou local** : par défaut (`auto`), le client exécute les commandes du harnais sans rien demander à l'utilisateur. Lancé avec `--policy confirm`, il demande une confirmation locale pour les commandes destructives — et *systématiquement* pour `read_file`/`write_file` ; avec `--policy deny`, il les refuse d'office
 8. **Fermeture** : le code expire ou le client s'arrête ; session clôturée, aucun résidu sur le PC
 
 ## Structure du dépôt
@@ -108,7 +108,8 @@ make checksums                        # SHA256SUMS (couvre les deux familles)
 ./claude-distant --url wss://relay.example.com --token <CLIENT_TOKEN>
 ```
 
-Flags utiles : `--policy auto|confirm|deny` (garde-fou local), `--remove-on-exit`
+Flags utiles : `--policy auto|confirm|deny` (garde-fou local, `auto` par défaut :
+aucune confirmation demandée ; `confirm` valide chaque opération sensible), `--remove-on-exit`
 (supprime le binaire à l'arrêt propre). Équivalents en variables d'environnement :
 `CLAUDE_DISTANT_URL`, `CLAUDE_DISTANT_TOKEN`, `CLAUDE_DISTANT_POLICY`, `CLAUDE_DISTANT_REMOVE_ON_EXIT`.
 

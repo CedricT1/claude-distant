@@ -362,9 +362,12 @@ Pour chaque binaire produit par `make dist`/`make dist-gui` :
 4. **Communiquer le code de session** à 9 chiffres affiché à l'écran
    (`784 123 678`) à l'opérateur (le harnais Claude), qui l'utilise côté
    relay pour cibler cette machine.
-5. **Approuver/refuser** les commandes sensibles si la politique
-   `--policy confirm` (par défaut) est active — chaque commande classée
-   destructive affiche une invite locale avant exécution.
+5. **Approuver/refuser** les commandes sensibles *si* la politique
+   `--policy confirm` a été demandée : chaque commande classée destructive
+   (et chaque `read_file`/`write_file`) affiche alors une invite locale avant
+   exécution. Par défaut (`--policy auto`), aucune invite n'est affichée et
+   les commandes du harnais s'exécutent directement — le client l'annonce au
+   démarrage, et la variante GUI garde son avertissement permanent à l'écran.
 6. **Fermer** le client (Ctrl-C dans le terminal, ou fermer la fenêtre) dès
    la session terminée : la connexion se ferme proprement, le dossier de
    travail temporaire est supprimé intégralement, et le jeton est effacé de

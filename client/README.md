@@ -55,9 +55,13 @@ machine cible, sans installation, service, clé de registre ni autostart.
 ```sh
 ./claude-distant-client \
   --url wss://relay.example.com/ws/client \
-  --token <CLIENT_TOKEN> \
-  --policy confirm
+  --token <CLIENT_TOKEN>
 ```
+
+Sans `--policy`, le client démarre en `auto` : les commandes envoyées par le
+harnais s'exécutent sans invite de confirmation. Ajouter `--policy confirm`
+pour valider chaque opération sensible une par une (voir « Politique de
+garde-fou » ci-dessous).
 
 ### Binaire personnalisé : lancement sans argument
 
@@ -92,7 +96,7 @@ secret à traiter comme tel (voir `docs/SECURITY.md`).
 |---|---|---|---|
 | `--url` | `CLAUDE_DISTANT_URL` | — (requis, sauf binaire personnalisé) | URL WebSocket du relay, ex. `wss://relay.example.com/ws/client` |
 | `--token` | `CLAUDE_DISTANT_TOKEN` | — (requis, sauf binaire personnalisé) | Jeton Bearer pré-configuré |
-| `--policy` | `CLAUDE_DISTANT_POLICY` | `confirm` | Garde-fou : `auto` \| `confirm` \| `deny` |
+| `--policy` | `CLAUDE_DISTANT_POLICY` | `auto` | Garde-fou : `auto` \| `confirm` \| `deny` |
 | `--insecure-skip-verify` | — | `false` | Désactive la vérification TLS (dev uniquement, jamais en production) |
 | `--remove-on-exit` | `CLAUDE_DISTANT_REMOVE_ON_EXIT` | `false` | À l'arrêt propre, supprime aussi le binaire lui-même (best-effort). Voir `docs/PACKAGING.md` §1 |
 | `--ephemeral-code` | `CLAUDE_DISTANT_EPHEMERAL_CODE` | `false` | Revient au code de session aléatoire à chaque connexion (comportement d'avant l'adresse stable) au lieu du code stable dérivé de la machine. Voir « Adresse stable » ci-dessous |
@@ -130,8 +134,13 @@ Au démarrage, le client :
 
 ### Politique de garde-fou (`--policy`)
 
-- `auto` : toutes les commandes s'exécutent sans confirmation.
-- `confirm` (défaut) : les commandes classées **destructives** déclenchent
+- `auto` (défaut) : toutes les commandes s'exécutent sans confirmation, y
+  compris `read_file`/`write_file`. C'est le mode « le harnais travaille sans
+  interrompre l'opérateur » : aucune invite locale n'est affichée, aucune
+  `approval_response` n'est émise. Le garde-fou reste disponible à tout
+  moment via `--policy confirm`/`deny`, ou l'interrupteur « mode
+  automatique » de la GUI (à décocher pour repasser en `confirm` à chaud).
+- `confirm` : les commandes classées **destructives** déclenchent
   une invite locale `Le harnais veut exécuter : <commande> [Autoriser/Refuser]`
   et attendent la réponse de l'opérateur avant exécution. Un refus renvoie
   `result` avec `error:"refused_by_user"`.
@@ -221,11 +230,13 @@ console, sous une autre forme :
 - **Mode automatique** : un interrupteur « Mode automatique — ne plus
   demander de confirmation » bascule la politique de garde-fou de `confirm`
   vers `auto` en cours de session (et inversement), sans redémarrer le
-  client. Un avertissement visible et permanent reste affiché tant qu'il est
-  actif : plus aucune commande ni opération fichier (`read_file`/`write_file`
-  compris) n'est alors soumise à confirmation locale. C'est une décision de
-  l'utilisateur du poste, à prendre en connaissance de cause — voir
-  `docs/SECURITY.md`.
+  client. Il reflète la politique de lancement, donc **coché par défaut**
+  (`--policy` valant `auto` en l'absence de flag) ; le décocher repasse la
+  session en `confirm` à chaud. Un avertissement visible et permanent reste
+  affiché tant qu'il est actif : plus aucune commande ni opération fichier
+  (`read_file`/`write_file` compris) n'est alors soumise à confirmation
+  locale. C'est une décision de l'utilisateur du poste, à prendre en
+  connaissance de cause — voir `docs/SECURITY.md`.
 - **Confirmation** : en mode `confirm`, une boîte de dialogue Fyne remplace
   l'invite console, avec les mêmes trois réponses — Autoriser, Refuser,
   Toujours (mémorisation de cette commande exacte pour le reste de la

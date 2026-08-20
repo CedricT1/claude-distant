@@ -141,8 +141,10 @@ sur le tirage aléatoire ; un ancien relay ignore simplement ce champ inconnu
 et attribue un code aléatoire comme avant.
 
 ### Garde-fou local (politique configurable)
-Le client est lancé avec une politique `--policy auto|confirm|deny` :
-- `auto` : exécute sans confirmation.
+Le client est lancé avec une politique `--policy auto|confirm|deny`
+(défaut : `auto`) :
+- `auto` (défaut) : exécute sans confirmation, et n'émet donc aucune
+  `approval_response` — le harnais enchaîne ses commandes sans interruption.
 - `confirm` : pour les commandes classées destructives, affiche localement
   « Le harnais veut exécuter : `X` [Autoriser/Refuser/Toujours] (o/N/t) ».
   Sans approbation → refus. Répondre « toujours » (`t`) approuve la commande

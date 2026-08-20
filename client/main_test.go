@@ -68,7 +68,11 @@ func TestParseConfig_FallsBackToEnv(t *testing.T) {
 	}
 }
 
-func TestParseConfig_DefaultPolicyIsConfirm(t *testing.T) {
+// TestParseConfig_DefaultPolicyIsAuto pins the default guard-rail policy:
+// with neither --policy nor CLAUDE_DISTANT_POLICY set, the client runs the
+// harness's commands without prompting the operator for each one. `confirm`
+// (per-operation prompt) and `deny` stay one flag/env var away.
+func TestParseConfig_DefaultPolicyIsAuto(t *testing.T) {
 	cfg, err := parseConfig(
 		[]string{"-url=wss://x/ws/client", "-token=t"},
 		noEnv,
@@ -76,8 +80,37 @@ func TestParseConfig_DefaultPolicyIsConfirm(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if cfg.policy != PolicyAuto {
+		t.Errorf("policy = %v, want %v (default)", cfg.policy, PolicyAuto)
+	}
+}
+
+// TestParseConfig_PolicyConfirmStillSelectable is the flip side of the
+// default above: switching the per-operation prompt back on must stay a
+// single flag (and, below, a single environment variable) away.
+func TestParseConfig_PolicyConfirmStillSelectable(t *testing.T) {
+	cfg, err := parseConfig(
+		[]string{"-url=wss://x/ws/client", "-token=t", "-policy=confirm"},
+		noEnv,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if cfg.policy != PolicyConfirm {
-		t.Errorf("policy = %v, want %v (default)", cfg.policy, PolicyConfirm)
+		t.Errorf("policy = %v, want %v", cfg.policy, PolicyConfirm)
+	}
+}
+
+func TestParseConfig_PolicyFromEnv(t *testing.T) {
+	cfg, err := parseConfig(
+		[]string{"-url=wss://x/ws/client", "-token=t"},
+		envMap(map[string]string{"CLAUDE_DISTANT_POLICY": "confirm"}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.policy != PolicyConfirm {
+		t.Errorf("policy = %v, want %v (from env)", cfg.policy, PolicyConfirm)
 	}
 }
 

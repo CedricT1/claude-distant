@@ -82,6 +82,14 @@ func main() {
 	defer stop()
 
 	fmt.Printf("claude-distant client v%s (%s/%s) — policy=%s\n", version, runtime.GOOS, runtime.GOARCH, cfg.policy)
+	// `auto` étant désormais la politique par défaut, l'opérateur doit le
+	// lire noir sur blanc au démarrage : c'est le pendant console de
+	// l'avertissement permanent affiché par la GUI quand son « mode
+	// automatique » est actif (client/gui.go).
+	if cfg.policy == PolicyAuto {
+		fmt.Println("Mode automatique : les commandes et opérations fichier du harnais s'exécutent SANS confirmation.")
+		fmt.Println("Pour valider chaque opération sensible : --policy confirm (ou CLAUDE_DISTANT_POLICY=confirm).")
+	}
 	fmt.Println("Connexion au relay...")
 
 	// RunGuarded guarantees the cleanup below runs exactly once no matter
@@ -195,7 +203,14 @@ func parseConfigWithDefaults(args []string, getenv func(string) string, defaults
 		policyStr = getenv("CLAUDE_DISTANT_POLICY")
 	}
 	if policyStr == "" {
-		policyStr = string(PolicyConfirm)
+		// Défaut `auto` : le harnais enchaîne les commandes sans
+		// solliciter l'opérateur à chaque fois. Le garde-fou n'a pas
+		// disparu — `--policy confirm` (ou CLAUDE_DISTANT_POLICY=confirm,
+		// ou l'interrupteur « mode automatique » de la GUI, décoché) le
+		// réactive commande par commande, `deny` refuse tout d'office —
+		// mais il n'est plus la valeur par défaut : voir la remarque
+		// correspondante dans docs/SECURITY.md §1ter.
+		policyStr = string(PolicyAuto)
 	}
 	policy, err := ParsePolicy(policyStr)
 	if err != nil {
