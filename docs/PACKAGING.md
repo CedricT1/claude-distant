@@ -118,12 +118,13 @@ que la variante GUI n'est ni statique ni `CGO_ENABLED=0` : Fyne l'exige.
 ### Prérequis de build — variante GUI uniquement
 
 La variante console (§3) ne requiert que Go. La variante GUI, elle, a besoin
-d'une toolchain C et des bibliothèques de développement X11/OpenGL sur la
-machine qui compile :
+d'une toolchain C et des bibliothèques de développement X11/OpenGL **et
+Wayland** sur la machine qui compile :
 
 ```sh
 # Debian/Ubuntu — cible Linux (compilation native, CGO_ENABLED=1)
-sudo apt install gcc libgl1-mesa-dev xorg-dev libxxf86vm-dev
+sudo apt install gcc libgl1-mesa-dev xorg-dev libxxf86vm-dev \
+                 libwayland-dev wayland-protocols libwayland-bin libxkbcommon-dev
 
 # Debian/Ubuntu — cible Windows depuis Linux (cross-compilation mingw)
 sudo apt install gcc-mingw-w64-x86-64
@@ -136,6 +137,13 @@ présents) — un oubli facile puisque `xorg-dev` seul ne le tire pas
 automatiquement sur toutes les distributions. `gcc-mingw-w64-x86-64` fournit
 `x86_64-w64-mingw32-gcc`, le compilateur C utilisé par `make dist-gui` (via
 `CC=x86_64-w64-mingw32-gcc`) pour produire l'exécutable Windows depuis Linux.
+
+Les quatre paquets Wayland sont tout aussi obligatoires que les paquets X11,
+même pour une machine qui n'utilise que X11 : GLFW, la bibliothèque C sur
+laquelle repose Fyne, compile ses deux backends (`c_glfw_lin_x11.go` **et**
+`c_glfw_lin_wayland.go`) dans le même build Linux. Sans eux, `make dist-gui`
+s'arrête sur `wayland-client-core.h: No such file or directory` alors même que
+la cible console compile sans broncher.
 
 ### Binaires non versionnés dans git
 
