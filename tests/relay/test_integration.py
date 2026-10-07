@@ -188,6 +188,60 @@ class TestWebSocketRegistration:
             assert reply["type"] == "heartbeat_ack"
 
 
+class TestDuplicateRegisterOnOneConnection:
+    """Une connexion WS = une session. Un `register` rejoué ne crée rien.
+
+    Sans cette garde, un client authentifié pouvait créer des sessions sans
+    borne sur une seule connexion (mémoire du store, squat de codes via
+    `desired_code`) et, en mode `per_session`, ouvrir N sessions avec un
+    jeton censé n'en valoir qu'une.
+    """
+
+    async def test_second_register_returns_same_code_and_creates_no_session(self, running_app):
+        app, port = running_app
+        async with _connect(port) as ws:
+            first = await _register(ws, hostname="first")
+            second = await _register(ws, hostname="second", desired_code="123456789")
+            assert second == first
+            assert len(app.state.session_store._records) == 1
+            record = await app.state.broker.get_session_info(first)
+            assert record is not None and record.hostname == "first"
+            assert await app.state.broker.get_session_info("123456789") is None
+
+    async def test_replayed_register_keeps_the_connection_usable(self, running_app):
+        app, port = running_app
+        async with _connect(port) as ws:
+            code = await _register(ws)
+            await _register(ws)
+            await ws.send(json.dumps({"type": "heartbeat"}))
+            assert json.loads(await ws.recv())["type"] == "heartbeat_ack"
+            assert await app.state.broker.heartbeat(code) is True
+
+    async def test_per_session_token_cannot_open_a_second_session_by_replaying_register(self):
+        app = create_app(
+            client_token=CLIENT_TOKEN,
+            mcp_bearer_token=MCP_TOKEN,
+            session_ttl_seconds=30,
+            client_auth_mode="per_session",
+        )
+        config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning")
+        server = uvicorn.Server(config)
+        task = asyncio.create_task(server.serve())
+        while not server.started:
+            await asyncio.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        try:
+            issued_token = app.state.client_token_store.issue(ttl_seconds=30)
+            async with _connect(port, token=issued_token) as ws:
+                first = await _register(ws)
+                second = await _register(ws)
+                assert second == first
+                assert len(app.state.session_store._records) == 1
+        finally:
+            server.should_exit = True
+            await task
+
+
 class TestDispatchCommandOverRealWebSocket:
     async def test_command_roundtrip_and_aggregation(self, running_app):
         app, port = running_app

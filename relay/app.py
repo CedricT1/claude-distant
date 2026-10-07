@@ -220,6 +220,20 @@ def create_app(
                 message = await websocket.receive_json()
                 msg_type = message.get("type")
                 if msg_type == "register":
+                    if session_code is not None:
+                        # Une connexion n'a droit qu'à une seule session. Un
+                        # `register` rejoué est traité de façon idempotente :
+                        # on renvoie le code déjà attribué, sans créer de
+                        # nouvel enregistrement. Sinon un client authentifié
+                        # pourrait multiplier les sessions sans borne (mémoire
+                        # du store, squat de codes via `desired_code`) et, en
+                        # mode `per_session`, ouvrir N sessions avec un jeton
+                        # censé n'en valoir qu'une. Un client légitime n'envoie
+                        # jamais deux `register` sur la même connexion.
+                        await websocket.send_json(
+                            {"type": "registered", "session_code": session_code}
+                        )
+                        continue
                     if client_auth_mode == "per_session" and token is not None:
                         # Jeton à usage unique : consommé dès le premier
                         # register réussi, pour empêcher toute réutilisation.
