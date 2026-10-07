@@ -251,6 +251,11 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "DENY" always;
 
+    # Indispensable pour `write_file` : le contenu (jusqu'à 8 Mio bruts,
+    # ~11 Mo en base64) voyage dans un POST /mcp ; le défaut nginx (1m)
+    # répondrait 413 au-delà de ~750 Ko.
+    client_max_body_size 12m;
+
     location / {
         proxy_pass http://localhost:8080;  # ou l'adresse de la machine hôte
         proxy_http_version 1.1;
@@ -358,6 +363,16 @@ retrait du store, échec propre de toute commande en cours
 (`ClientDisconnectedError`), fermeture de la connexion WebSocket cliente.
 Utilisable à tout moment par l'opérateur/harnais pour couper court à un
 comportement suspect, sans attendre l'expiration du TTL de session.
+
+Côté client, la coupure est **définitive** : à la réception du message
+`session_terminated` (ou du code de fermeture WebSocket 4402 qui le suit),
+le client sort de sa boucle de reconnexion et s'arrête
+(`client/main.go:errSessionTerminated`, idem pour la GUI). Sans cela, en mode
+`CLIENT_AUTH_MODE=shared`, le client se reconnectait de lui-même après
+quelques secondes avec le même jeton partagé et le même code stable, ce qui
+réduisait le kill-switch à une brève interruption. Relancer le client reste
+possible — c'est alors un nouveau consentement explicite de l'utilisateur
+du poste.
 
 ## 7. Politique de commandes
 

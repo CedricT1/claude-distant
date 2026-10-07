@@ -198,6 +198,18 @@ Chaque outil prend un `session_code` pour cibler le bon client (sauf
 détecté à `register`). Le relay traduit l'appel MCP en message `command` vers le client
 et agrège les `stream`/`result` renvoyés.
 
+`timeout` (`run_command`/`run_shell`, secondes, strictement positif) est
+transmis au client dans `params.timeout` (entier, arrondi vers le haut) : c'est
+le client qui borne l'exécution et tue le processus à l'échéance (plafond
+30 min côté client), puis renvoie un `result` portant `error="timeout"`. Le
+relay attend ce même délai plus une courte marge avant d'abandonner de son
+côté. Absent, le client applique son défaut (5 min) et le relay le sien
+(`COMMAND_TIMEOUT_SECONDS`, délai entre deux messages).
+
+Une connexion WebSocket ne porte qu'**une seule** session : un `register`
+rejoué sur la même connexion renvoie le code déjà attribué sans créer de
+nouvelle session (ni honorer un nouveau `desired_code`).
+
 ---
 
 ## 3. Codes de session
