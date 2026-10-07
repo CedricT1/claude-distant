@@ -87,6 +87,12 @@ func (c *Conn) ReadEnvelope() (MessageType, []byte, error) {
 	return env.Type, data, nil
 }
 
+// isSessionTerminatedClose reports whether err is the relay closing the
+// connection with CloseCodeSessionTerminated (kill-switch).
+func isSessionTerminatedClose(err error) bool {
+	return websocket.IsCloseError(err, CloseCodeSessionTerminated)
+}
+
 // Close sends a normal WebSocket close frame and releases the connection.
 // Safe to call more than once.
 func (c *Conn) Close() error {

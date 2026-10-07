@@ -23,6 +23,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -109,6 +110,12 @@ func guiRunForever(ctx context.Context, cfg config, ws *Workspace, g *guiState) 
 			return ctx.Err()
 		}
 		fyne.Do(func() { g.setStatus(statusDisconnected) })
+		if errors.Is(err, errSessionTerminated) {
+			// Kill-switch (main.go's errSessionTerminated): final, no
+			// reconnect — same contract as runForever.
+			g.activityLog.Append(ActivityEvent{Time: time.Now(), Kind: ActivityConnection, Detail: "session terminée par l'opérateur (kill-switch) : arrêt, pas de reconnexion"})
+			return err
+		}
 		if err != nil {
 			g.activityLog.Append(ActivityEvent{Time: time.Now(), Kind: ActivityConnection, Detail: fmt.Sprintf("connexion perdue: %v", err)})
 		}
@@ -163,10 +170,15 @@ func guiRunSession(ctx context.Context, cfg config, ws *Workspace, g *guiState) 
 	for {
 		msgType, data, err := conn.ReadEnvelope()
 		if err != nil {
+			if isSessionTerminatedClose(err) {
+				return errSessionTerminated
+			}
 			return err
 		}
 
 		switch msgType {
+		case TypeSessionTerminated:
+			return errSessionTerminated
 		case TypeRegistered:
 			var m RegisteredMessage
 			if jsonErr := json.Unmarshal(data, &m); jsonErr == nil {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -28,6 +29,16 @@ const (
 	minBackoff        = 1 * time.Second
 	maxBackoff        = 30 * time.Second
 )
+
+// errSessionTerminated is returned by runSession (and guiRunSession) when
+// the relay invalidated this session on purpose — the kill-switch
+// (`terminate_session`, docs/SECURITY.md §6), signalled by a
+// `session_terminated` message and/or a 4402 close code. The reconnect
+// loops treat it as FINAL: the whole point of a kill-switch is that the
+// client does not come back a few seconds later with the same shared token
+// and the same stable session code, which is exactly what the generic
+// "connection lost, retry with backoff" path would do.
+var errSessionTerminated = errors.New("session terminée par le relay (kill-switch) : arrêt du client, pas de reconnexion")
 
 // consoleOut is where a live session writes what the operator reads: the
 // session code and the activity journal (consolelog.go). A package-level
@@ -260,6 +271,9 @@ func runForever(ctx context.Context, cfg config, ws *Workspace) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		if errors.Is(err, errSessionTerminated) {
+			return err
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "connexion perdue (%v), nouvelle tentative dans %s\n", err, backoff)
 		}
@@ -328,6 +342,9 @@ func runSession(ctx context.Context, cfg config, ws *Workspace) error {
 	for {
 		msgType, data, err := conn.ReadEnvelope()
 		if err != nil {
+			if isSessionTerminatedClose(err) {
+				return errSessionTerminated
+			}
 			return err
 		}
 
@@ -337,6 +354,10 @@ func runSession(ctx context.Context, cfg config, ws *Workspace) error {
 			if jsonErr := json.Unmarshal(data, &m); jsonErr == nil {
 				printSessionCode(m.SessionCode)
 			}
+		case TypeSessionTerminated:
+			fmt.Fprintln(consoleOut)
+			fmt.Fprintln(consoleOut, "Session terminée par l'opérateur (kill-switch). Le client s'arrête.")
+			return errSessionTerminated
 		case TypeCommand:
 			var m CommandMessage
 			if jsonErr := json.Unmarshal(data, &m); jsonErr != nil {

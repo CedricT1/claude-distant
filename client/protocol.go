@@ -19,7 +19,18 @@ const (
 	TypeRegistered   MessageType = "registered"
 	TypeCommand      MessageType = "command"
 	TypeHeartbeatAck MessageType = "heartbeat_ack"
+	// TypeSessionTerminated is the kill-switch notification
+	// (relay/broker.py:Broker.terminate_session): the operator/harness
+	// explicitly invalidated this session. The client must STOP, not
+	// reconnect — see errSessionTerminated in main.go.
+	TypeSessionTerminated MessageType = "session_terminated"
 )
+
+// CloseCodeSessionTerminated is the WebSocket close code the relay sends
+// right after a `session_terminated` message (relay/app.py's
+// WS_SESSION_TERMINATED_CLOSE_CODE). It is honoured on its own too, in
+// case the close frame is the only thing that gets through.
+const CloseCodeSessionTerminated = 4402
 
 // StreamKind identifies which output stream a `stream` message carries.
 type StreamKind string
