@@ -77,6 +77,7 @@ import base64
 import binascii
 import contextlib
 import hashlib
+import math
 from typing import TYPE_CHECKING, Any
 
 from mcp.server.auth.middleware.auth_context import get_access_token
@@ -137,6 +138,52 @@ MIN_FILE_TRANSFER_CLIENT_VERSION = "0.2.0"
 # Plafond d'un transfert, dans les deux sens. Côté écriture, il découle
 # directement du fait que le contenu voyage dans une seule trame `command`.
 MAX_FILE_TRANSFER_BYTES = 8 * 1024 * 1024
+# Marge ajoutée au `timeout` du harnais pour l'attente côté relay. Le
+# `timeout` est transmis au client (clé `params.timeout`, en secondes
+# entières), qui tue le processus à l'échéance et renvoie un `result`
+# portant `error="timeout"`. Pour que ce `result` ait le temps d'arriver
+# (au lieu que relay et client abandonnent au même instant et que le
+# harnais ne voie qu'un timeout relay anonyme), le relay attend un peu
+# plus longtemps que le client — voir `_resolve_command_timeout`.
+COMMAND_TIMEOUT_GRACE_SECONDS = 5.0
+
+
+def _resolve_command_timeout(
+    timeout: float | None,
+) -> tuple[int | None, float | None, dict[str, Any] | None]:
+    """Normalise le `timeout` optionnel de `run_command`/`run_shell`.
+
+    Retourne `(timeout_client, timeout_relay, erreur)` :
+      - `timeout_client` : valeur entière (secondes, arrondie vers le haut)
+        à placer dans `params.timeout` pour que le **client** borne lui-même
+        l'exécution (`client/executor.go` lit un `int`, un flottant JSON
+        ferait échouer son décodage) ; `None` si le harnais n'a rien demandé,
+        auquel cas la trame `command` reste identique à ce qu'elle était
+        avant que ce paramètre ne soit transmis.
+      - `timeout_relay` : délai d'attente du broker, soit le timeout client
+        plus :data:`COMMAND_TIMEOUT_GRACE_SECONDS` ; `None` pour le défaut.
+      - `erreur` : dict d'outil `invalid_params` si `timeout` est fourni mais
+        non strictement positif (0 vaudrait « pas de limite » côté client,
+        exactement l'ambiguïté que `read_file` refuse déjà pour `max_bytes`).
+
+    Historiquement `timeout` ne réglait que l'attente du relay : le client
+    exécutait toujours avec son propre défaut (5 min), si bien qu'un
+    harnais demandant 10 s recevait bien `timeout` après 10 s… tandis que
+    le processus continuait de tourner sur la cible.
+    """
+    if timeout is None:
+        return None, None, None
+    if timeout <= 0:
+        return None, None, {
+            "status": "error",
+            "error": "invalid_params",
+            "detail": (
+                f"`timeout` doit être strictement positif s'il est fourni "
+                f"(reçu {timeout!r})"
+            ),
+        }
+    client_timeout = int(math.ceil(timeout))
+    return client_timeout, client_timeout + COMMAND_TIMEOUT_GRACE_SECONDS, None
 
 
 def _check_scope(
@@ -285,14 +332,26 @@ def create_mcp_server(
     async def run_command(
         session_code: str, command: str, timeout: float | None = None
     ) -> dict[str, Any]:
-        """Exécute une commande simple sur la cible (stdout/stderr/exit_code)."""
+        """Exécute une commande simple sur la cible (stdout/stderr/exit_code).
+
+        `timeout` (secondes, optionnel) est transmis au client, qui tue le
+        processus à l'échéance (plafonné à 30 min côté client) ; le relay
+        attend ce même délai plus une courte marge. Doit être strictement
+        positif s'il est fourni (`invalid_params` sinon).
+        """
         scope_error = _check_scope(
             require_scopes, "run_command", SCOPE_COMMAND_EXECUTE, audit_log, session_code
         )
         if scope_error is not None:
             return scope_error
+        client_timeout, relay_timeout, timeout_error = _resolve_command_timeout(timeout)
+        if timeout_error is not None:
+            return timeout_error
+        params: dict[str, Any] = {"command": command}
+        if client_timeout is not None:
+            params["timeout"] = client_timeout
         return await _dispatch_and_aggregate(
-            broker, session_code, "run_command", {"command": command}, timeout=timeout
+            broker, session_code, "run_command", params, timeout=relay_timeout
         )
 
     @mcp.tool()
@@ -306,19 +365,22 @@ def create_mcp_server(
 
         `shell="auto"` (défaut) : PowerShell sur Windows, Bash sur Linux,
         selon l'OS détecté à `register`. Override possible :
-        `powershell`/`pwsh`/`bash`/`sh`.
+        `powershell`/`pwsh`/`bash`/`sh`. `timeout` : même sémantique que
+        pour `run_command` (transmis au client, strictement positif).
         """
         scope_error = _check_scope(
             require_scopes, "run_shell", SCOPE_COMMAND_EXECUTE, audit_log, session_code
         )
         if scope_error is not None:
             return scope_error
+        client_timeout, relay_timeout, timeout_error = _resolve_command_timeout(timeout)
+        if timeout_error is not None:
+            return timeout_error
+        params: dict[str, Any] = {"command": command, "shell": shell}
+        if client_timeout is not None:
+            params["timeout"] = client_timeout
         return await _dispatch_and_aggregate(
-            broker,
-            session_code,
-            "run_shell",
-            {"command": command, "shell": shell},
-            timeout=timeout,
+            broker, session_code, "run_shell", params, timeout=relay_timeout
         )
 
     @mcp.tool()

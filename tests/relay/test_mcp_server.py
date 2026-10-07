@@ -23,7 +23,7 @@ from relay.broker import (
     CommandTimeoutError,
     SessionNotFoundError,
 )
-from relay.mcp_server import create_mcp_server
+from relay.mcp_server import COMMAND_TIMEOUT_GRACE_SECONDS, create_mcp_server
 from relay.session_store import InMemorySessionStore, SessionRecord
 
 
@@ -154,11 +154,47 @@ class TestRunCommandAggregation:
         assert broker.calls[-1][1:4] == ("123456789", "run_command", {"command": "ls"})
 
     async def test_passes_timeout_through(self):
+        """`timeout` est transmis au client (params.timeout, entier) ET règle
+        l'attente du relay, avec une marge pour laisser au client le temps de
+        renvoyer son propre `result` « timeout » après avoir tué le processus."""
         broker = StubBroker()
         broker.chunks = [{"type": "result", "exit_code": 0, "error": None}]
         mcp = create_mcp_server(broker)
         await call_tool(mcp, "run_command", {"session_code": "1", "command": "ls", "timeout": 12})
-        assert broker.calls[-1][4] == 12
+        _name, _code, _tool, params, relay_timeout = broker.calls[-1]
+        assert params == {"command": "ls", "timeout": 12}
+        assert isinstance(params["timeout"], int)
+        assert relay_timeout == 12 + COMMAND_TIMEOUT_GRACE_SECONDS
+
+    async def test_fractional_timeout_is_rounded_up_for_the_client(self):
+        # Le client Go décode `timeout` dans un int : un flottant JSON ferait
+        # échouer son décodage. On arrondit vers le haut pour ne jamais
+        # raccourcir ce que le harnais a demandé.
+        broker = StubBroker()
+        broker.chunks = [{"type": "result", "exit_code": 0, "error": None}]
+        mcp = create_mcp_server(broker)
+        await call_tool(mcp, "run_command", {"session_code": "1", "command": "ls", "timeout": 2.3})
+        assert broker.calls[-1][3]["timeout"] == 3
+        assert broker.calls[-1][4] == 3 + COMMAND_TIMEOUT_GRACE_SECONDS
+
+    async def test_no_timeout_leaves_params_and_relay_default_untouched(self):
+        broker = StubBroker()
+        broker.chunks = [{"type": "result", "exit_code": 0, "error": None}]
+        mcp = create_mcp_server(broker)
+        await call_tool(mcp, "run_command", {"session_code": "1", "command": "ls"})
+        assert "timeout" not in broker.calls[-1][3]
+        assert broker.calls[-1][4] is None
+
+    async def test_non_positive_timeout_is_rejected_before_dispatch(self):
+        broker = StubBroker()
+        mcp = create_mcp_server(broker)
+        for bad in (0, -5):
+            result = await call_tool(
+                mcp, "run_command", {"session_code": "1", "command": "ls", "timeout": bad}
+            )
+            assert result["status"] == "error"
+            assert result["error"] == "invalid_params"
+        assert broker.calls == []
 
 
 class TestRunShell:
@@ -168,6 +204,30 @@ class TestRunShell:
         mcp = create_mcp_server(broker)
         await call_tool(mcp, "run_shell", {"session_code": "1", "command": "echo hi"})
         assert broker.calls[-1][3]["shell"] == "auto"
+
+    async def test_timeout_is_forwarded_to_the_client(self):
+        broker = StubBroker()
+        broker.chunks = [{"type": "result", "exit_code": 0, "error": None}]
+        mcp = create_mcp_server(broker)
+        await call_tool(
+            mcp, "run_shell", {"session_code": "1", "command": "sleep 99", "timeout": 7}
+        )
+        _name, _code, _tool, params, relay_timeout = broker.calls[-1]
+        assert params == {"command": "sleep 99", "shell": "auto", "timeout": 7}
+        assert relay_timeout == 7 + COMMAND_TIMEOUT_GRACE_SECONDS
+
+    async def test_non_positive_timeout_is_rejected_before_dispatch(self):
+        broker = StubBroker()
+        mcp = create_mcp_server(broker)
+        result = await call_tool(
+            mcp, "run_shell", {"session_code": "1", "command": "ls", "timeout": 0}
+        )
+        assert result == {
+            "status": "error",
+            "error": "invalid_params",
+            "detail": result["detail"],
+        }
+        assert broker.calls == []
 
     async def test_overrides_shell(self):
         broker = StubBroker()
