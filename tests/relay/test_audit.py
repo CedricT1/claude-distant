@@ -72,6 +72,49 @@ class TestRecord:
         assert second["prev_hash"] == first["hash"]
 
 
+class TestCorruptedLogAtStartup:
+    """Un journal abîmé ne doit jamais empêcher le relay de démarrer.
+
+    `AuditLog()` est instancié à l'import de `relay.app` : une exception
+    ici (ligne JSON tronquée après un disque plein ou un crash en pleine
+    écriture) mettrait le conteneur en boucle de redémarrage jusqu'à
+    réparation manuelle du fichier.
+    """
+
+    def test_truncated_last_line_does_not_break_startup(self, log_path):
+        log1 = AuditLog(path=log_path)
+        good = log1.record({"session_code": "1", "tool": "a", "decision": "allowed"})
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write('{"session_code": "1", "tool": "b", "dec')  # coupé net, sans \n
+
+        log2 = AuditLog(path=log_path)  # ne doit pas lever
+        entry = log2.record({"session_code": "1", "tool": "c", "decision": "allowed"})
+        assert entry["prev_hash"] == good["hash"]
+
+    def test_non_object_line_is_skipped(self, log_path):
+        log1 = AuditLog(path=log_path)
+        good = log1.record({"session_code": "1", "tool": "a", "decision": "allowed"})
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write("[1, 2, 3]\n")
+            fh.write('"juste une chaine"\n')
+        entry = AuditLog(path=log_path).record({"session_code": "1", "tool": "b", "decision": "allowed"})
+        assert entry["prev_hash"] == good["hash"]
+
+    def test_corruption_stays_detectable_by_verify_chain(self, log_path):
+        AuditLog(path=log_path).record({"session_code": "1", "tool": "a", "decision": "allowed"})
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write('{"tronq')
+        AuditLog(path=log_path).record({"session_code": "1", "tool": "b", "decision": "allowed"})
+        assert verify_chain(log_path) is False
+
+    def test_startup_warning_names_the_bad_line(self, log_path, caplog):
+        with log_path.open("w", encoding="utf-8") as fh:
+            fh.write("pas du json\n")
+        with caplog.at_level("WARNING", logger="relay.audit"):
+            AuditLog(path=log_path)
+        assert any("ligne 1" in rec.getMessage() for rec in caplog.records)
+
+
 class TestVerifyChain:
     def test_empty_or_missing_log_is_valid(self, log_path):
         assert verify_chain(log_path) is True

@@ -24,11 +24,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 GENESIS_HASH = "0" * 64
 DEFAULT_AUDIT_LOG_PATH = "./audit.log"
@@ -73,16 +76,43 @@ class AuditLog:
         self._prev_hash = self._read_last_hash()
 
     def _read_last_hash(self) -> str:
+        """Retrouve le hash de la dernière entrée valide pour reprendre la chaîne.
+
+        Une ligne illisible (JSON tronqué après un disque plein ou une coupure
+        en pleine écriture, ligne qui n'est pas un objet) est **ignorée avec
+        un avertissement** plutôt que de faire échouer le constructeur : ce
+        dernier est appelé à l'import de `relay.app`, et une exception ici
+        empêcherait le relay de démarrer tant que le fichier n'est pas réparé
+        à la main (boucle de redémarrage du conteneur). L'intégrité reste
+        vérifiable après coup : :func:`verify_chain` retourne `False` sur ce
+        même fichier, ce qui est précisément son rôle.
+        """
         if not self._path.exists():
             return GENESIS_HASH
         last_hash = GENESIS_HASH
         with self._path.open("r", encoding="utf-8") as fh:
-            for line in fh:
+            for lineno, line in enumerate(fh, start=1):
                 line = line.strip()
                 if not line:
                     continue
-                entry = json.loads(line)
-                last_hash = entry.get("hash", last_hash)
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "audit: ligne %d de %s illisible (JSON invalide), ignorée ; "
+                        "la chaîne reprend sur la dernière entrée valide",
+                        lineno,
+                        self._path,
+                    )
+                    continue
+                if not isinstance(entry, dict):
+                    logger.warning(
+                        "audit: ligne %d de %s n'est pas un objet JSON, ignorée", lineno, self._path
+                    )
+                    continue
+                stored = entry.get("hash")
+                if isinstance(stored, str) and stored:
+                    last_hash = stored
         return last_hash
 
     def record(self, event: dict[str, Any]) -> dict[str, Any]:
